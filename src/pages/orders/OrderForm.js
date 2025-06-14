@@ -64,6 +64,7 @@ import {
 } from 'firebase/firestore';
 import { format } from 'date-fns';
 import { LocalOffer } from '@mui/icons-material';
+import OrderProcessing from './OrderProcessing'; // Add this import
 
 const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
   const [user] = useAuthState(auth);
@@ -156,7 +157,7 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
     // Handle different reward types
     if (reward.name.includes('%')) {
       const percentage = parseFloat(reward.name.replace('%', '')) / 100;
-      const discount = totalAmount * percentage;
+      const discount = totalAmount * percentage; // totalAmount is now defined above
       setDiscountApplied(discount);
       showSnackbar(`${reward.name} discount applied!`, 'success');
     } else if (reward.name.includes('Free')) {
@@ -189,6 +190,7 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
   const handleCancel = () => {
     setSelectedReward(null);
     setDiscountApplied(0);
+    setPaymentOrder(null); // <-- Only close payment dialog here
     onCancel();
   };
 
@@ -352,6 +354,9 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
     })));
     setShowLastOrders(false);
   };
+
+  // Move this up so it's defined before first use (before handleApplyReward)
+  const totalAmount = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
 
   // Update handleAddItem to include variant and add-ons
   const handleAddItem = () => {
@@ -618,24 +623,262 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
       // Commit the batch
       await batch.commit();
 
-      // Reset form state
+      // Prepare new order data for payment dialog
+      const createdOrder = {
+        ...cleanedOrderData,
+        id: orderRef.id
+      };
+
+      // Show payment dialog using OrderProcessing
+      setPaymentOrder(createdOrder);
+
+      // Reset form state (but do not call onSubmit yet)
       setSelectedReward(null);
       setDiscountApplied(0);
       setItems([]);
       setCustomerName('');
       setNotes('');
 
-      // Call success callback
-      onSubmit();
-      
-      showSnackbar('Order submitted successfully!', 'success');
+      // Remove: setNewOrderData(createdOrder); setShowPaymentDialog(true);
+      // Remove: showSnackbar('Order submitted successfully! Please process payment.', 'success');
     } catch (error) {
       console.error('Error submitting order:', error);
       showSnackbar('Error submitting order. Please try again.', 'error');
     }
   };
 
-  const totalAmount = items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+  // --- Product Selection Dialog: Confirm selection logic ---
+  // Add this helper to check if all selected products have required variant/variety selected
+  const isDialogSelectionValid = () => {
+    return Object.entries(dialogSelectedProducts).every(([productId]) => {
+      const product = products.find(p => p.id === productId);
+      const opts = dialogProductOptions[productId] || {};
+      // If product has varieties, require variety selection
+      if (product?.varieties?.length > 0 && !opts.variety) return false;
+      // If product has variants, require variant selection
+      if ((!product?.varieties || product.varieties.length === 0) && product?.variants?.length > 0 && !opts.variant) return false;
+      return true;
+    });
+  };
+
+  // --- Payment dialog logic: Only close dialog on cancel, not after payment ---
+  const [paymentOrder, setPaymentOrder] = useState(null);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
+
+  // Handler to process payment (mimics OrderProcessing.js logic)
+  const handleProcessPayment = async ({ amount, method }) => {
+    if (!paymentOrder) return;
+    setIsProcessingPayment(true);
+    try {
+      // Update order with payment details and mark as paid
+      await updateDoc(doc(db, 'orders', paymentOrder.id), {
+        payment: {
+          amount: amount,
+          method: method,
+          date: serverTimestamp(),
+          processedBy: user.uid,
+          processedByName: userData?.firstName || user.email.split('@')[0]
+        },
+        status: 'paid',
+        updatedAt: serverTimestamp()
+      });
+
+      // Add to queue collection
+      await addDoc(collection(db, 'queue'), {
+        orderId: paymentOrder.id,
+        status: 'waiting',
+        createdAt: serverTimestamp(),
+        customerName: paymentOrder.customerName || 'Walk-in',
+        total: paymentOrder.total,
+        items: paymentOrder.items,
+        payment: {
+          amount: amount,
+          method: method
+        }
+      });
+
+      // Add activity log
+      await addDoc(collection(db, 'activityLogs'), {
+        type: 'payment',
+        description: `Payment processed for Order #${paymentOrder.id.slice(0, 8)}`,
+        userId: user.uid,
+        userEmail: user.email,
+        userName: userData?.firstName || user.email.split('@')[0],
+        amount: amount,
+        orderId: paymentOrder.id,
+        timestamp: serverTimestamp()
+      });
+
+      // Print receipt and close dialog after printing
+      printReceiptForOrder({
+        ...paymentOrder,
+        payment: { amount, method },
+        createdAt: paymentOrder.createdAt && paymentOrder.createdAt.toDate
+          ? paymentOrder.createdAt.toDate()
+          : (paymentOrder.createdAt instanceof Date
+            ? paymentOrder.createdAt
+            : new Date())
+      }, () => {
+        setIsProcessingPayment(false);
+        setPaymentOrder(null);
+        if (onSubmit) onSubmit();
+      });
+
+    } catch (error) {
+      setIsProcessingPayment(false);
+      alert('Error processing payment. Please try again.');
+      console.error('Error processing payment:', error);
+    }
+  };
+
+  // Helper to print receipt and close dialog after printing
+  const printReceiptForOrder = (order, onPrinted) => {
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Receipt for Order #${order.id.slice(0, 8)}</title>
+          <style>
+            body { font-family: Arial, sans-serif; width: 80mm; margin: 0 auto; padding: 10px; }
+            .receipt-header { text-align: center; margin-bottom: 10px; }
+            .receipt-footer { text-align: center; margin-top: 10px; }
+            table { width: 100%; border-collapse: collapse; }
+            td { padding: 3px 0; vertical-align: top; }
+            .text-right { text-align: right; }
+            .text-bold { font-weight: bold; }
+            .text-error { color: #d32f2f; }
+            .item-details { font-size: 11px; color: #666; margin-left: 8px; display: block; }
+            hr { border: 0; border-top: 1px dashed #000; margin: 10px 0; }
+          </style>
+        </head>
+        <body>
+    `);
+
+    const createdAtDate =
+      order.createdAt && order.createdAt.toDate
+        ? order.createdAt.toDate()
+        : (order.createdAt instanceof Date
+          ? order.createdAt
+          : new Date());
+
+    printWindow.document.write(`
+      <div class="receipt-header">
+        <h3>Madnifeeco</h3>
+        <p>530 Conch St., Tondo Manila</p>
+        <p>Tel: (123) 456-7890</p>
+      </div>
+      <hr>
+      <p>Order #: ${order.id.slice(0, 8)}</p>
+      <p>Date: ${format(createdAtDate, 'MMM dd, yyyy HH:mm')}</p>
+      <p>Customer: ${order.customerName || 'Walk-in'}</p>
+      <hr>
+      <table>
+        <tbody>
+          ${order.items.map((item, index) => {
+            let details = '';
+            // Show variety if present
+            if (item.variety) {
+              details += `<span class="item-details">Variety: ${item.variety}</span>`;
+            }
+            if (item.variantName) {
+              details += `<span class="item-details">Variant: ${item.variantName}${typeof item.variantPrice !== 'undefined' && item.variantPrice !== null ? ` (+₱${Number(item.variantPrice).toFixed(2)})` : ''}</span>`;
+            }
+            if (item.addOns && item.addOns.length > 0) {
+              item.addOns.forEach(addOn => {
+                details += `<span class="item-details">Add-on: ${addOn.name}${typeof addOn.price !== 'undefined' && addOn.price !== null ? ` (+₱${Number(addOn.price).toFixed(2)})` : ''}</span>`;
+              });
+            } else if (item.addOnNames && item.addOnNames.length > 0) {
+              details += `<span class="item-details">Add-ons: ${item.addOnNames.join(', ')}</span>`;
+            }
+            return `
+<tr>
+  <td>
+    ${item.isReward
+      ? `<strong>FREE:</strong> ${item.name}`
+      : `${item.quantity}x ${item.name}`
+    }
+    ${details}
+  </td>
+  <td class="text-right">
+    ${item.isReward ? 'FREE' : `₱${(item.price * item.quantity).toFixed(2)}`}
+  </td>
+</tr>
+`;
+          }).join('')}
+          ${order.discountApplied > 0 ? `
+            <tr>
+              <td class="text-error">${order.rewardUsed || 'Discount'}:</td>
+              <td class="text-right text-error">-₱${order.discountApplied.toFixed(2)}</td>
+            </tr>
+          ` : ''}
+          <tr>
+            <td class="text-bold">Subtotal:</td>
+            <td class="text-right text-bold">₱${order.total?.toFixed(2) || '0.00'}</td>
+          </tr>
+          ${order.pointsEarned > 0 ? `
+            <tr>
+              <td>Points Earned:</td>
+              <td class="text-right">+${order.pointsEarned} pts</td>
+            </tr>
+          ` : ''}
+          ${order.pointsDeducted > 0 ? `
+            <tr>
+              <td>Points Redeemed:</td>
+              <td class="text-right">-${order.pointsDeducted} pts</td>
+            </tr>
+          ` : ''}
+          ${order.payment ? `
+            <tr>
+              <td>Tax:</td>
+              <td class="text-right">₱0.00</td>
+            </tr>
+            <tr>
+              <td class="text-bold">Total:</td>
+              <td class="text-right text-bold">₱${order.total?.toFixed(2) || '0.00'}</td>
+            </tr>
+            <tr>
+              <td>Payment Method:</td>
+              <td class="text-right">
+                ${
+                  order.payment.method
+                    ? (order.payment.method.charAt(0).toUpperCase() + order.payment.method.slice(1))
+                    : 'N/A'
+                }
+              </td>
+            </tr>
+            <tr>
+              <td>Amount Tendered:</td>
+              <td class="text-right">
+                ₱${order.payment.amount !== undefined && order.payment.amount !== null ? Number(order.payment.amount).toFixed(2) : '0.00'}
+              </td>
+            </tr>
+            <tr>
+              <td class="text-bold">Change Due:</td>
+              <td class="text-right text-bold">
+                ₱${order.payment.amount !== undefined && order.payment.amount !== null ? (order.payment.amount - order.total).toFixed(2) : '0.00'}
+              </td>
+            </tr>
+          ` : ''}
+        </tbody>
+      </table>
+      <hr>
+      <div class="receipt-footer">
+        <p>Thank you for your visit!</p>
+        <p>Please come again</p>
+      </div>
+    `);
+
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+
+    printWindow.onload = function() {
+      setTimeout(() => {
+        printWindow.print();
+        printWindow.close();
+        if (typeof onPrinted === 'function') onPrinted();
+      }, 500);
+    };
+  };
 
   // Fetch variants and add-ons on mount
   useEffect(() => {
@@ -750,47 +993,61 @@ const getProductDialogPrice = (product, options = {}) => {
 
   // Confirm selection: add all selected products with options to order
   const handleDialogConfirm = () => {
+    // Prepare items to confirm
     const newItems = [];
     Object.entries(dialogSelectedProducts).forEach(([productId, qty]) => {
       const product = products.find(p => p.id === productId);
       if (!product) return;
       const opts = dialogProductOptions[productId] || {};
       let itemPrice = getProductDialogPrice(product, opts);
-      // Add-ons
       const addOnObjs = addOns.filter(a => (opts.addOns || []).includes(a.id));
       let addOnsTotal = addOnObjs.reduce((sum, a) => sum + Number(a.price || 0), 0);
       let itemTotalPrice = itemPrice + addOnsTotal;
-      // Variant object
       let variantObj = opts.variant ? variants.find(v => v.id === opts.variant) : null;
-      // Check if already in items (same product, variant, addOns, variety)
-      const existingIndex = items.findIndex(
+      newItems.push({
+        productId,
+        name: product.name,
+        price: itemTotalPrice,
+        quantity: opts.qty || qty,
+        variantId: variantObj ? variantObj.id : opts.variant || undefined,
+        variantName: variantObj ? variantObj.name : (() => {
+          const v = variants.find(vv => vv.id === opts.variant);
+          return v ? v.name : undefined;
+        })(),
+        addOnIds: addOnObjs.map(a => a.id),
+        addOnNames: addOnObjs.map(a => a.name),
+        addOns: addOnObjs,
+        variety: opts.variety
+      });
+    });
+    setMultiConfirmItems(newItems);
+    setShowMultiConfirmDialog(true);
+  };
+
+  // New state for multi-select confirmation and payment dialog
+  const [showMultiConfirmDialog, setShowMultiConfirmDialog] = useState(false);
+  const [multiConfirmItems, setMultiConfirmItems] = useState([]);
+
+  // New: Confirm multi-selection and add to order
+  const handleMultiConfirmAdd = () => {
+    // Merge with existing items (combine if same product/options)
+    let updatedItems = [...items];
+    multiConfirmItems.forEach(newItem => {
+      const existingIndex = updatedItems.findIndex(
         item =>
-          item.productId === productId &&
-          item.variantId === (variantObj ? variantObj.id : opts.variant || undefined) &&
-          JSON.stringify(item.addOnIds || []) === JSON.stringify((addOnObjs || []).map(a => a.id)) &&
-          item.variety === opts.variety
+          item.productId === newItem.productId &&
+          item.variantId === newItem.variantId &&
+          JSON.stringify(item.addOnIds || []) === JSON.stringify(newItem.addOnIds || []) &&
+          item.variety === newItem.variety
       );
       if (existingIndex >= 0) {
-        items[existingIndex].quantity += opts.qty || qty;
+        updatedItems[existingIndex].quantity += newItem.quantity;
       } else {
-        newItems.push({
-          productId,
-          name: product.name,
-          price: itemTotalPrice,
-          quantity: opts.qty || qty,
-          variantId: variantObj ? variantObj.id : opts.variant || undefined,
-          variantName: variantObj ? variantObj.name : (() => {
-            const v = variants.find(vv => vv.id === opts.variant);
-            return v ? v.name : undefined;
-          })(),
-          addOnIds: addOnObjs.map(a => a.id),
-          addOnNames: addOnObjs.map(a => a.name),
-          addOns: addOnObjs,
-          variety: opts.variety
-        });
+        updatedItems.push(newItem);
       }
     });
-    setItems([...items, ...newItems]);
+    setItems(updatedItems);
+    setShowMultiConfirmDialog(false);
     setShowProductDialog(false);
     setDialogSelectedProducts({});
     setDialogProductOptions({});
@@ -801,88 +1058,83 @@ const getProductDialogPrice = (product, options = {}) => {
     setQuantity(1);
   };
 
-  // Reset dialog state on close
-  const handleDialogClose = () => {
-    setShowProductDialog(false);
-    setDialogSelectedProducts({});
-    setDialogProductOptions({});
-  };
+  // --- Add these hooks and helpers before the return statement ---
 
   // Fetch categories for dialog display (for horizontal list)
-const [categories, setCategories] = useState([]);
-useEffect(() => {
-  const fetchCategories = async () => {
-    const q = query(collection(db, 'categories'));
-    const querySnapshot = await getDocs(q);
-    setCategories(querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+  const [categories, setCategories] = useState([]);
+  useEffect(() => {
+    const fetchCategories = async () => {
+      const q = query(collection(db, 'categories'));
+      const querySnapshot = await getDocs(q);
+      setCategories(querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+    };
+    fetchCategories();
+  }, []);
+
+  // Get unique categories from products (by categoryId)
+  const productCategories = React.useMemo(() => {
+    // Use categories from DB for display
+    return [{ id: 'All', name: 'All' }, ...categories];
+  }, [categories]);
+
+  // Filtered and searched products for dialog
+  const filteredProducts = React.useMemo(() => {
+    let filtered = products.filter(p => p.available !== false);
+    if (dialogCategory && dialogCategory !== 'All') {
+      filtered = filtered.filter(p => p.categoryId === dialogCategory);
+    }
+    if (dialogSearch) {
+      const s = dialogSearch.toLowerCase();
+      filtered = filtered.filter(
+        p =>
+          (p.name && p.name.toLowerCase().includes(s)) ||
+          (p.description && p.description.toLowerCase().includes(s))
+      );
+    }
+    return filtered;
+  }, [products, dialogCategory, dialogSearch]);
+
+  // Helper to get category name by id
+  const getCategoryName = (categoryId) => {
+    if (!categoryId) return '';
+    const cat = categories.find(c => c.id === categoryId);
+    return cat ? cat.name : '';
   };
-  fetchCategories();
-}, []);
 
-// Get unique categories from products (by categoryId)
-const productCategories = React.useMemo(() => {
-  // Use categories from DB for display
-  return [{ id: 'All', name: 'All' }, ...categories];
-}, [categories]);
+  // --- Product Detail Dialog state and helpers ---
+  const [showProductDetailDialog, setShowProductDetailDialog] = useState(false);
+  const [productDetail, setProductDetail] = useState(null);
+  const [productDetailOptions, setProductDetailOptions] = useState({
+    variety: '',
+    variant: '',
+    addOns: [],
+    qty: 1
+  });
 
-// Filtered and searched products for dialog
-const filteredProducts = React.useMemo(() => {
-  let filtered = products.filter(p => p.available !== false);
-  if (dialogCategory && dialogCategory !== 'All') {
-    filtered = filtered.filter(p => p.categoryId === dialogCategory);
-  }
-  if (dialogSearch) {
-    const s = dialogSearch.toLowerCase();
-    filtered = filtered.filter(
-      p =>
-        (p.name && p.name.toLowerCase().includes(s)) ||
-        (p.description && p.description.toLowerCase().includes(s))
-    );
-  }
-  return filtered;
-}, [products, dialogCategory, dialogSearch]);
-
-// Helper to get category name by id
-const getCategoryName = (categoryId) => {
-  if (!categoryId) return '';
-  const cat = categories.find(c => c.id === categoryId);
-  return cat ? cat.name : '';
-};
-
-  // Add state for product detail dialog
-const [showProductDetailDialog, setShowProductDetailDialog] = useState(false);
-const [productDetail, setProductDetail] = useState(null);
-const [productDetailOptions, setProductDetailOptions] = useState({
-  variety: '',
-  variant: '',
-  addOns: [],
-  qty: 1
-});
-
-// Helper to get price for product detail dialog
-const getProductDetailPrice = (product, options = {}) => {
-  if (!product) return 0;
-  // Variety price
-  if (product.varieties && product.varieties.length > 0 && options.variety) {
-    const varietyObj = product.varieties.find(v => v.name === options.variety);
-    return varietyObj ? Number(varietyObj.price) : 0;
-  }
-  // Variant price
-  if (
-    (!product.varieties || product.varieties.length === 0) &&
-    product.variants && product.variants.length > 0 &&
-    options.variant
-  ) {
-    const variantObj = variants.find(v => v.id === options.variant);
-    return typeof product.variantPrices?.[options.variant] === 'number'
-      ? Number(product.variantPrices[options.variant])
-      : (variantObj ? Number(variantObj.price || 0) : 0);
-  }
-  // Fallback
-  return typeof product.basePrice === 'number'
-    ? product.basePrice
-    : (typeof product.price === 'number' ? product.price : 0);
-};
+  // Helper to get price for product detail dialog
+  const getProductDetailPrice = (product, options = {}) => {
+    if (!product) return 0;
+    // Variety price
+    if (product.varieties && product.varieties.length > 0 && options.variety) {
+      const varietyObj = product.varieties.find(v => v.name === options.variety);
+      return varietyObj ? Number(varietyObj.price) : 0;
+    }
+    // Variant price
+    if (
+      (!product.varieties || product.varieties.length === 0) &&
+      product.variants && product.variants.length > 0 &&
+      options.variant
+    ) {
+      const variantObj = variants.find(v => v.id === options.variant);
+      return typeof product.variantPrices?.[options.variant] === 'number'
+        ? Number(product.variantPrices[options.variant])
+        : (variantObj ? Number(variantObj.price || 0) : 0);
+    }
+    // Fallback
+    return typeof product.basePrice === 'number'
+      ? product.basePrice
+      : (typeof product.price === 'number' ? product.price : 0);
+  };
 
   // Open product detail dialog
   const handleOpenProductDetail = (product) => {
@@ -935,13 +1187,25 @@ const getProductDetailPrice = (product, options = {}) => {
           addOns: addOnObjs,
           variety: opts.variety
         }
-      ]);
+     ] );
     }
     setShowProductDetailDialog(false);
     setProductDetail(null);
     setProductDetailOptions({ variety: '', variant: '', addOns: [], qty: 1 });
     setShowProductDialog(false);
   };
+
+  // Reset dialog state on close
+  const handleDialogClose = () => {
+    setShowProductDialog(false);
+    setDialogSelectedProducts({});
+    setDialogProductOptions({});
+  };
+
+  // --- Add this helper to remove a product from multiConfirmItems ---
+const handleRemoveMultiConfirmItem = (idx) => {
+  setMultiConfirmItems(items => items.filter((_, i) => i !== idx));
+};
 
   return (
     <form onSubmit={handleSubmit}>
@@ -1204,63 +1468,179 @@ const getProductDetailPrice = (product, options = {}) => {
                       }}
                     >
                       <Grid container spacing={2}>
-                        {filteredProducts.map((product) => (
-                          <Grid
-                            item
-                            xs={6}
-                            sm={4}
-                            md={2}
-                            lg={2}
-                            xl={2}
-                            key={product.id}
-                            sx={{
-                              display: 'flex'
-                            }}
-                          >
-                            <Card
-                              variant="outlined"
+                        {filteredProducts.map((product) => {
+                          const isSelected = !!dialogSelectedProducts[product.id];
+                          return (
+                            <Grid
+                              item
+                              xs={6}
+                              sm={4}
+                              md={2}
+                              lg={2}
+                              xl={2}
+                              key={product.id}
                               sx={{
-                                borderRadius: 3,
-                                p: 2,
-                                height: '100%',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                alignItems: 'center',
-                                cursor: 'pointer',
-                                borderColor: '#ede7e3',
-                                transition: 'box-shadow 0.2s',
-                                width: '100%'
+                                display: 'flex'
                               }}
-                              onClick={() => handleOpenProductDetail(product)}
                             >
-                              {product.imageUrl && (
-                                <Box
-                                  component="img"
-                                  src={product.imageUrl}
-                                  alt={product.name}
-                                  sx={{
-                                    width: 60,
-                                    height: 60,
-                                    objectFit: 'cover',
-                                    borderRadius: 2,
-                                    mb: 1,
-                                    border: '1px solid #eee',
-                                    background: '#fafafa'
-                                  }}
-                                />
-                              )}
-                              <Typography variant="subtitle2" fontWeight={600} align="center" sx={{ mb: 0.5 }}>
-                                {product.name}
-                              </Typography>
-                              <Typography variant="caption" color="text.secondary" align="center" sx={{ mb: 0.5 }}>
-                                {getCategoryName(product.categoryId)}
-                              </Typography>
-                              <Typography variant="body2" color="primary" fontWeight={700}>
-                                ₱{getProductDisplayPrice(product).toFixed(2)}
-                              </Typography>
-                            </Card>
-                          </Grid>
-                        ))}
+                              <Card
+                                variant={isSelected ? "elevation" : "outlined"}
+                                sx={{
+                                  borderRadius: 3,
+                                  p: 2,
+                                  height: '100%',
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: 'center',
+                                  cursor: 'pointer',
+                                  borderColor: isSelected ? 'primary.main' : '#ede7e3',
+                                  boxShadow: isSelected ? 4 : 'none',
+                                  width: '100%',
+                                  background: isSelected ? '#e3f2fd' : undefined
+                                }}
+                                // Only toggle selection if clicking the card background, not the controls
+                                onClick={e => {
+                                  // Only toggle if the click is on the card itself, not on a child input/control
+                                  if (e.target === e.currentTarget) {
+                                    handleDialogProductToggle(product.id);
+                                  }
+                                }}
+                              >
+                                {product.imageUrl && (
+                                  <Box
+                                    component="img"
+                                    src={product.imageUrl}
+                                    alt={product.name}
+                                    sx={{
+                                      width: 60,
+                                      height: 60,
+                                      objectFit: 'cover',
+                                      borderRadius: 2,
+                                      mb: 1,
+                                      border: '1px solid #eee',
+                                      background: '#fafafa'
+                                    }}
+                                  />
+                                )}
+                                <Typography variant="subtitle2" fontWeight={600} align="center" sx={{ mb: 0.5 }}>
+                                  {product.name}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" align="center" sx={{ mb: 0.5 }}>
+                                  {getCategoryName(product.categoryId)}
+                                </Typography>
+                                <Typography variant="body2" color="primary" fontWeight={700}>
+                                  ₱{getProductDisplayPrice(product).toFixed(2)}
+                                </Typography>
+                                {isSelected && (
+                                  <Box sx={{ mt: 1, width: '100%' }}>
+                                    {/* Variety */}
+                                    {product.varieties?.length > 0 && (
+                                      <FormControl
+                                        size="small"
+                                        fullWidth
+                                        sx={{ mb: 1 }}
+                                        onClick={e => e.stopPropagation()}
+                                      >
+                                        <InputLabel>Variety</InputLabel>
+                                        <Select
+                                          label="Variety"
+                                          value={dialogProductOptions[product.id]?.variety || ''}
+                                          onChange={e => handleDialogOptionChange(product.id, 'variety', e.target.value)}
+                                        >
+                                          <MenuItem value="">None</MenuItem>
+                                          {product.varieties.map(v => (
+                                            <MenuItem key={v.name} value={v.name}>
+                                              {v.name} (₱{Number(v.price).toFixed(2)})
+                                            </MenuItem>
+                                          ))}
+                                        </Select>
+                                      </FormControl>
+                                    )}
+                                    {/* Variant */}
+                                    {product.variants?.length > 0 && (
+                                      <FormControl
+                                        size="small"
+                                        fullWidth
+                                        sx={{ mb: 1 }}
+                                        onClick={e => e.stopPropagation()}
+                                      >
+                                        <InputLabel>Variant</InputLabel>
+                                        <Select
+                                          label="Variant"
+                                          value={dialogProductOptions[product.id]?.variant || ''}
+                                          onChange={e => handleDialogOptionChange(product.id, 'variant', e.target.value)}
+                                        >
+                                          <MenuItem value="">None</MenuItem>
+                                          {product.variants.map(variantId => {
+                                            const variant = variants.find(v => v.id === variantId);
+                                            const variantPrice = product?.variantPrices?.[variantId];
+                                            return (
+                                              <MenuItem key={variantId} value={variantId}>
+                                                {variant ? variant.name : variantId}
+                                                {typeof variantPrice === 'number'
+                                                  ? ` (₱${variantPrice.toFixed(2)})`
+                                                  : variant && variant.price
+                                                    ? ` (+₱${Number(variant.price).toFixed(2)})`
+                                                    : ''}
+                                              </MenuItem>
+                                            );
+                                          })}
+                                        </Select>
+                                      </FormControl>
+                                    )}
+                                    {/* Add-ons */}
+                                    {addOns.length > 0 && (
+                                      <FormControl
+                                        size="small"
+                                        fullWidth
+                                        sx={{ mb: 1 }}
+                                        onClick={e => e.stopPropagation()}
+                                      >
+                                        <InputLabel>Add-ons</InputLabel>
+                                        <Select
+                                          label="Add-ons"
+                                          multiple
+                                          value={dialogProductOptions[product.id]?.addOns || []}
+                                          onChange={e => handleDialogOptionChange(product.id, 'addOns', e.target.value)}
+                                          renderValue={selected => addOns.filter(a => selected.includes(a.id)).map(a => a.name).join(', ')}
+                                        >
+                                          {addOns.map(addOn => (
+                                            <MenuItem key={addOn.id} value={addOn.id}>
+                                              {addOn.name} {addOn.price ? `(+₱${Number(addOn.price).toFixed(2)})` : ''}
+                                            </MenuItem>
+                                          ))}
+                                        </Select>
+                                      </FormControl>
+                                    )}
+                                    {/* Quantity */}
+                                    <Box onClick={e => e.stopPropagation()}>
+                                      <TextField
+                                        type="number"
+                                        label="Qty"
+                                        value={dialogProductOptions[product.id]?.qty || 1}
+                                        onChange={e => handleDialogQuantityChange(product.id, Math.max(1, parseInt(e.target.value) || 1))}
+                                        inputProps={{ min: 1 }}
+                                        size="small"
+                                        sx={{ width: 90 }}
+                                      />
+                                    </Box>
+                                    {/* Price */}
+                                    <Typography variant="body2" color="primary" fontWeight={700} sx={{ mt: 1 }}>
+                                      ₱{getProductDialogPrice(product, dialogProductOptions[product.id] || {}).toFixed(2)}
+                                      {(dialogProductOptions[product.id]?.addOns?.length > 0) && (
+                                        <>
+                                          {' + '}
+                                          ₱{addOns.filter(a => (dialogProductOptions[product.id]?.addOns || []).includes(a.id)).reduce((sum, a) => sum + Number(a.price || 0), 0).toFixed(2)}
+                                          {' (Add-ons)'}
+                                        </>
+                                      )}
+                                    </Typography>
+                                  </Box>
+                                )}
+                              </Card>
+                            </Grid>
+                          );
+                        })}
                         {filteredProducts.length === 0 && (
                           <Grid item xs={12}>
                             <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
@@ -1272,10 +1652,83 @@ const getProductDetailPrice = (product, options = {}) => {
                     </Box>
                   </DialogContent>
                   <DialogActions>
-                    <Button onClick={handleDialogClose}>Close</Button>
+                    <Button onClick={handleDialogClose}>Cancel</Button>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      disabled={
+                        Object.keys(dialogSelectedProducts).length === 0 ||
+                        !isDialogSelectionValid()
+                      }
+                      onClick={handleDialogConfirm}
+                    >
+                      Confirm Selection
+                    </Button>
                   </DialogActions>
                 </Dialog>
                 {/* END Product Grid Dialog */}
+
+                {/* Multi-item Confirm Dialog */}
+                <Dialog
+                  open={showMultiConfirmDialog}
+                  onClose={() => setShowMultiConfirmDialog(false)}
+                  fullWidth
+                  maxWidth="sm"
+                >
+                  <DialogTitle>Confirm Selected Products</DialogTitle>
+                  <DialogContent>
+                    {multiConfirmItems.length === 0 ? (
+                      <Typography>No products selected.</Typography>
+                    ) : (
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Product</TableCell>
+                            <TableCell>Variety</TableCell>
+                            <TableCell>Variant</TableCell>
+                            <TableCell>Add-ons</TableCell>
+                            <TableCell align="center">Qty</TableCell>
+                            <TableCell align="right">Total</TableCell>
+                            <TableCell align="center">Remove</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {multiConfirmItems.map((item, idx) => (
+                            <TableRow key={idx}>
+                              <TableCell>{item.name}</TableCell>
+                              <TableCell>{item.variety || '-'}</TableCell>
+                              <TableCell>{item.variantName || '-'}</TableCell>
+                              <TableCell>{item.addOnNames && item.addOnNames.length > 0 ? item.addOnNames.join(', ') : '-'}</TableCell>
+                              <TableCell align="center">{item.quantity}</TableCell>
+                              <TableCell align="right">₱{(item.price * item.quantity).toFixed(2)}</TableCell>
+                              <TableCell align="center">
+                                <IconButton
+                                  color="error"
+                                  size="small"
+                                  onClick={() => handleRemoveMultiConfirmItem(idx)}
+                                >
+                                  <DeleteIcon fontSize="small" />
+                                </IconButton>
+                              </TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    )}
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setShowMultiConfirmDialog(false)}>Cancel</Button>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      onClick={handleMultiConfirmAdd}
+                      disabled={multiConfirmItems.length === 0}
+                    >
+                      Add to Order
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+                {/* END Multi-item Confirm Dialog */}
 
                 {/* Product Detail Dialog */}
                 <Dialog
@@ -1437,6 +1890,12 @@ const getProductDetailPrice = (product, options = {}) => {
                     ) : (
                       <Typography fontWeight="500">
                         {item.name}
+                      </Typography>
+                    )}
+                    {/* Show variety if present */}
+                    {item.variety && (
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', ml: 1 }}>
+                        Variety: {item.variety}
                       </Typography>
                     )}
                   </TableCell>
@@ -1910,7 +2369,24 @@ const getProductDetailPrice = (product, options = {}) => {
     </DialogActions>
   </Dialog>
           
-          
+          {/* Show payment dialog after order is created */}
+          {paymentOrder && (
+            <OrderProcessing
+              order={{
+                ...paymentOrder,
+                createdAt:
+                  paymentOrder.createdAt && paymentOrder.createdAt.toDate
+                    ? paymentOrder.createdAt.toDate()
+                    : (paymentOrder.createdAt instanceof Date
+                      ? paymentOrder.createdAt
+                      : new Date())
+              }}
+              onClose={() => setPaymentOrder(null)}
+              onUpdate={() => {}}
+              onProcessPayment={handleProcessPayment}
+              isProcessingPayment={isProcessingPayment}
+            />
+          )}
       </form>
     );
   };

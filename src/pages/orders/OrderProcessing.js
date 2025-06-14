@@ -40,7 +40,13 @@ import { format } from 'date-fns';
 import Receipt from '../../components/Receipt';
 
 
-const OrderProcessing = ({ order, onClose, onUpdate }) => {
+const OrderProcessing = ({
+  order,
+  onClose,
+  onUpdate,
+  onProcessPayment, // new prop for external payment handler
+  isProcessingPayment // new prop to disable button while processing
+}) => {
   const [user] = useAuthState(auth);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('cash');
@@ -92,133 +98,153 @@ React.useEffect(() => {
   }
 };
 
-  // In OrderProcessing.js, update the handlePayment function:
-const handlePayment = async () => {
-  const amount = parseFloat(paymentAmount);
-  if (isNaN(amount) || amount < order.total) {
-    alert(`Payment amount must be at least ₱${order.total.toFixed(2)}`);
-    return;
-  }
-
-  try {
-    // Update order with payment details and mark as paid
-    await updateDoc(doc(db, 'orders', order.id), {
-      payment: {
-        amount: amount,
-        method: paymentMethod,
-        date: serverTimestamp(),
-        processedBy: user.uid,
-        processedByName: userData?.firstName || user.email.split('@')[0]
-      },
-      status: 'paid',
-      updatedAt: serverTimestamp()
-    });
-
-    // Add to queue collection
-    await addDoc(collection(db, 'queue'), {
-      orderId: order.id,
-      status: 'waiting',
-      createdAt: serverTimestamp(),
-      customerName: order.customerName || 'Walk-in',
-      total: order.total,
-      items: order.items,
-      payment: {
-        amount: amount,
+  // Only use internal payment handler if no onProcessPayment prop
+  const handlePayment = async () => {
+    if (onProcessPayment) {
+      // Use external handler (from OrderForm)
+      onProcessPayment({
+        amount: parseFloat(paymentAmount),
         method: paymentMethod
-      }
-    });
+      });
+      return;
+    }
+    const amount = parseFloat(paymentAmount);
+    if (isNaN(amount) || amount < order.total) {
+      alert(`Payment amount must be at least ₱${order.total.toFixed(2)}`);
+      return;
+    }
 
-    // Add activity log
-    await addDoc(collection(db, 'activityLogs'), {
-      type: 'payment',
-      description: `Payment processed for Order #${order.id.slice(0, 8)}`,
-      userId: user.uid,
-      userEmail: user.email,
-      userName: userData?.firstName || user.email.split('@')[0],
-      amount: amount,
-      orderId: order.id,
-      timestamp: serverTimestamp()
-    });
+    try {
+      // Update order with payment details and mark as paid
+      await updateDoc(doc(db, 'orders', order.id), {
+        payment: {
+          amount: amount,
+          method: paymentMethod,
+          date: serverTimestamp(),
+          processedBy: user.uid,
+          processedByName: userData?.firstName || user.email.split('@')[0]
+        },
+        status: 'paid',
+        updatedAt: serverTimestamp()
+      });
 
-    onUpdate();
-    onClose();
-  } catch (error) {
-    console.error('Error processing payment:', error);
-    alert('Error processing payment. Please try again.');
-  }
-};
+      // Add to queue collection
+      await addDoc(collection(db, 'queue'), {
+        orderId: order.id,
+        status: 'waiting',
+        createdAt: serverTimestamp(),
+        customerName: order.customerName || 'Walk-in',
+        total: order.total,
+        items: order.items,
+        payment: {
+          amount: amount,
+          method: paymentMethod
+        }
+      });
+
+      // Add activity log
+      await addDoc(collection(db, 'activityLogs'), {
+        type: 'payment',
+        description: `Payment processed for Order #${order.id.slice(0, 8)}`,
+        userId: user.uid,
+        userEmail: user.email,
+        userName: userData?.firstName || user.email.split('@')[0],
+        amount: amount,
+        orderId: order.id,
+        timestamp: serverTimestamp()
+      });
+
+      onUpdate();
+      onClose();
+    } catch (error) {
+      console.error('Error processing payment:', error);
+      alert('Error processing payment. Please try again.');
+    }
+  };
 
   // Update the printReceipt function in OrderProcessing.js
-const printReceipt = () => {
-  const printWindow = window.open('', '_blank');
-  printWindow.document.write(`
-    <html>
-      <head>
-        <title>Receipt for Order #${order.id.slice(0, 8)}</title>
-        <style>
-          body { 
-            font-family: Arial, sans-serif;
-            width: 80mm;
-            margin: 0 auto;
-            padding: 10px;
-          }
-          .receipt-header {
-            text-align: center;
-            margin-bottom: 10px;
-          }
-          .receipt-footer {
-            text-align: center;
-            margin-top: 10px;
-          }
-          table {
-            width: 100%;
-            border-collapse: collapse;
-          }
-          td {
-            padding: 3px 0;
-            vertical-align: top;
-          }
-          .text-right {
-            text-align: right;
-          }
-          .text-bold {
-            font-weight: bold;
-          }
-          .text-error {
-            color: #d32f2f;
-          }
-          .item-details {
-            font-size: 11px;
-            color: #666;
-            margin-left: 8px;
-            display: block;
-          }
-          hr {
-            border: 0;
-            border-top: 1px dashed #000;
-            margin: 10px 0;
-          }
-        </style>
-      </head>
-      <body>
+  const printReceipt = () => {
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Receipt for Order #${order.id.slice(0, 8)}</title>
+          <style>
+            body { 
+              font-family: Arial, sans-serif;
+              width: 80mm;
+              margin: 0 auto;
+              padding: 10px;
+            }
+            .receipt-header {
+              text-align: center;
+              margin-bottom: 10px;
+            }
+            .receipt-footer {
+              text-align: center;
+              margin-top: 10px;
+            }
+            table {
+              width: 100%;
+              border-collapse: collapse;
+            }
+            td {
+              padding: 3px 0;
+              vertical-align: top;
+            }
+            .text-right {
+              text-align: right;
+            }
+            .text-bold {
+              font-weight: bold;
+            }
+            .text-error {
+              color: #d32f2f;
+            }
+            .item-details {
+              font-size: 11px;
+              color: #666;
+              margin-left: 8px;
+              display: block;
+            }
+            hr {
+              border: 0;
+              border-top: 1px dashed #000;
+              margin: 10px 0;
+            }
+          </style>
+        </head>
+        <body>
   `);
+
+  // Fix date display for createdAt
+  const createdAtDate =
+    order.createdAt && order.createdAt instanceof Date
+      ? order.createdAt
+      : (order.createdAt && order.createdAt.toDate
+        ? order.createdAt.toDate()
+        : new Date());
 
   // Main receipt content
   printWindow.document.write(`
     <div class="receipt-header">
-      <h3>Your Cafe Name</h3>
-      <p>123 Cafe Street, City</p>
+      <h3>Madnifeeco</h3>
+      <p>530 Conch St., Tondo Manila</p>
       <p>Tel: (123) 456-7890</p>
     </div>
     <hr>
     <p>Order #: ${order.id.slice(0, 8)}</p>
-    <p>Date: ${order.createdAt?.toDate ? format(order.createdAt.toDate(), 'MMM dd, yyyy HH:mm') : 'N/A'}</p>
+    <p>Date: ${format(createdAtDate, 'MMM dd, yyyy HH:mm')}</p>
     <p>Customer: ${order.customerName || 'Walk-in'}</p>
     <hr>
     <table>
       <tbody>
         ${order.items.map((item, index) => {
           let details = '';
+          // Show variety if present
+          if (item.variety) {
+            details += `<span class="item-details">Variety: ${item.variety}</span>`;
+          }
           if (item.variantName) {
             details += `<span class="item-details">Variant: ${item.variantName}${typeof item.variantPrice !== 'undefined' && item.variantPrice !== null ? ` (+₱${Number(item.variantPrice).toFixed(2)})` : ''}</span>`;
           }
@@ -359,12 +385,23 @@ function renderItemDetails(item) {
     ? (order.payment.amount - order.total).toFixed(2)
     : 0;
 
+  // Fix date display for createdAt
+  const createdAtDate =
+    order.createdAt && order.createdAt instanceof Date
+      ? order.createdAt
+      : (order.createdAt && order.createdAt.toDate
+        ? order.createdAt.toDate()
+        : new Date());
+
   return (
     <Dialog
       open={true}
-      onClose={onClose}
+      // Only allow closing via Cancel Order if payment is pending
+      onClose={order.status === 'pending' ? undefined : onClose}
       maxWidth="md"
       fullWidth
+      disableEscapeKeyDown={order.status === 'pending'}
+      disableBackdropClick={order.status === 'pending'}
       PaperProps={{
         sx: {
           borderRadius: 4,
@@ -410,7 +447,7 @@ function renderItemDetails(item) {
                 Customer: <span style={{ fontWeight: 400 }}>{order.customerName}</span>
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Date: {order.createdAt?.toDate ? format(order.createdAt.toDate(), 'MMM dd, yyyy HH:mm') : 'N/A'}
+                Date: {createdAtDate ? format(createdAtDate, 'MMM dd, yyyy HH:mm') : 'N/A'}
               </Typography>
               {order.notes && (
                 <Typography variant="body2" sx={{ mt: 1 }}>
@@ -444,6 +481,12 @@ function renderItemDetails(item) {
     <Box sx={{ display: 'flex', alignItems: 'center' }}>
       <LocalOffer color="success" sx={{ mr: 1 }} />
       <span>{item.name} (FREE)</span>
+      {/* Show variety if present */}
+      {item.variety && (
+        <div style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
+          Variety: {item.variety}
+        </div>
+      )}
       {item.variantName && (
         <div style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
           Variant: {item.variantName}
@@ -470,6 +513,12 @@ function renderItemDetails(item) {
   ) : (
     <>
       <span>{item.name}</span>
+      {/* Show variety if present */}
+      {item.variety && (
+        <div style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
+          Variety: {item.variety}
+        </div>
+      )}
       {item.variantName && (
         <div style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
           Variant: {item.variantName}
@@ -649,6 +698,7 @@ function renderItemDetails(item) {
                   InputProps={{
                     startAdornment: <InputAdornment position="start">₱</InputAdornment>,
                   }}
+                  disabled={!!isProcessingPayment}
                 />
                 <TextField
                   fullWidth
@@ -657,6 +707,7 @@ function renderItemDetails(item) {
                   value={paymentMethod}
                   onChange={(e) => setPaymentMethod(e.target.value)}
                   sx={{ mb: 2 }}
+                  disabled={!!isProcessingPayment}
                 >
                   <MenuItem value="cash">Cash</MenuItem>
                   <MenuItem value="card">Credit Card</MenuItem>
@@ -690,7 +741,7 @@ function renderItemDetails(item) {
                   color="primary"
                   startIcon={<PaymentIcon />}
                   onClick={handlePayment}
-                  disabled={!paymentAmount}
+                  disabled={!paymentAmount || !!isProcessingPayment}
                   sx={{
                     borderRadius: 2,
                     fontWeight: 600,
@@ -700,7 +751,7 @@ function renderItemDetails(item) {
                     '&:hover': { background: '#5d4037' }
                   }}
                 >
-                  Complete Payment
+                  {isProcessingPayment ? 'Processing...' : 'Complete Payment'}
                 </Button>
               </Paper>
             ) : (
@@ -780,24 +831,40 @@ function renderItemDetails(item) {
           </Grid>
         </Grid>
       </DialogContent>
-      <DialogActions sx={{
-        background: 'rgba(255,255,255,0.95)',
-        borderBottomLeftRadius: 16,
-        borderBottomRightRadius: 16,
-        px: 4, py: 2
-      }}>
-        <Button onClick={onClose} sx={{
-          borderRadius: 2,
-          color: '#4e342e',
-          fontWeight: 600,
-          px: 3,
-          py: 1,
-          background: 'rgba(255,255,255,0.7)',
-          '&:hover': { background: '#f5f0e6' }
-        }}>
-          Close
-        </Button>
-      </DialogActions>
+      {/* DialogActions: Remove Close button if payment is pending */}
+      {order.status === 'pending' ? (
+        <DialogActions
+          sx={{
+            background: 'rgba(255,255,255,0.95)',
+            borderBottomLeftRadius: 16,
+            borderBottomRightRadius: 16,
+            px: 4, py: 2
+          }}
+        >
+          {/* No Close button here. Only Cancel Order is available in Order Actions above. */}
+        </DialogActions>
+      ) : (
+        <DialogActions
+          sx={{
+            background: 'rgba(255,255,255,0.95)',
+            borderBottomLeftRadius: 16,
+            borderBottomRightRadius: 16,
+            px: 4, py: 2
+          }}
+        >
+          <Button onClick={onClose} sx={{
+            borderRadius: 2,
+            color: '#4e342e',
+            fontWeight: 600,
+            px: 3,
+            py: 1,
+            background: 'rgba(255,255,255,0.7)',
+            '&:hover': { background: '#f5f0e6' }
+          }}>
+            Close
+          </Button>
+        </DialogActions>
+      )}
       <style>
         {`
           @keyframes fadeIn {
