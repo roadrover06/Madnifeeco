@@ -849,6 +849,100 @@ const getCategoryName = (categoryId) => {
   return cat ? cat.name : '';
 };
 
+  // Add state for product detail dialog
+const [showProductDetailDialog, setShowProductDetailDialog] = useState(false);
+const [productDetail, setProductDetail] = useState(null);
+const [productDetailOptions, setProductDetailOptions] = useState({
+  variety: '',
+  variant: '',
+  addOns: [],
+  qty: 1
+});
+
+// Helper to get price for product detail dialog
+const getProductDetailPrice = (product, options = {}) => {
+  if (!product) return 0;
+  // Variety price
+  if (product.varieties && product.varieties.length > 0 && options.variety) {
+    const varietyObj = product.varieties.find(v => v.name === options.variety);
+    return varietyObj ? Number(varietyObj.price) : 0;
+  }
+  // Variant price
+  if (
+    (!product.varieties || product.varieties.length === 0) &&
+    product.variants && product.variants.length > 0 &&
+    options.variant
+  ) {
+    const variantObj = variants.find(v => v.id === options.variant);
+    return typeof product.variantPrices?.[options.variant] === 'number'
+      ? Number(product.variantPrices[options.variant])
+      : (variantObj ? Number(variantObj.price || 0) : 0);
+  }
+  // Fallback
+  return typeof product.basePrice === 'number'
+    ? product.basePrice
+    : (typeof product.price === 'number' ? product.price : 0);
+};
+
+  // Open product detail dialog
+  const handleOpenProductDetail = (product) => {
+    setProductDetail(product);
+    setProductDetailOptions({
+      variety: '',
+      variant: '',
+      addOns: [],
+      qty: 1
+    });
+    setShowProductDetailDialog(true);
+  };
+
+  // Confirm product detail selection
+  const handleConfirmProductDetail = () => {
+    const product = productDetail;
+    const opts = productDetailOptions;
+    let itemPrice = getProductDetailPrice(product, opts);
+    const addOnObjs = addOns.filter(a => (opts.addOns || []).includes(a.id));
+    let addOnsTotal = addOnObjs.reduce((sum, a) => sum + Number(a.price || 0), 0);
+    let itemTotalPrice = itemPrice + addOnsTotal;
+    let variantObj = opts.variant ? variants.find(v => v.id === opts.variant) : null;
+    // Check if already in items (same product, variant, addOns, variety)
+    const existingIndex = items.findIndex(
+      item =>
+        item.productId === product.id &&
+        item.variantId === (variantObj ? variantObj.id : opts.variant || undefined) &&
+        JSON.stringify(item.addOnIds || []) === JSON.stringify((addOnObjs || []).map(a => a.id)) &&
+        item.variety === opts.variety
+    );
+    if (existingIndex >= 0) {
+      const updatedItems = [...items];
+      updatedItems[existingIndex].quantity += opts.qty || 1;
+      setItems(updatedItems);
+    } else {
+      setItems([
+        ...items,
+        {
+          productId: product.id,
+          name: product.name,
+          price: itemTotalPrice,
+          quantity: opts.qty || 1,
+          variantId: variantObj ? variantObj.id : opts.variant || undefined,
+          variantName: variantObj ? variantObj.name : (() => {
+            const v = variants.find(vv => vv.id === opts.variant);
+            return v ? v.name : undefined;
+          })(),
+          addOnIds: addOnObjs.map(a => a.id),
+          addOnNames: addOnObjs.map(a => a.name),
+          addOns: addOnObjs,
+          variety: opts.variety
+        }
+      ]);
+    }
+    setShowProductDetailDialog(false);
+    setProductDetail(null);
+    setProductDetailOptions({ variety: '', variant: '', addOns: [], qty: 1 });
+    setShowProductDialog(false);
+  };
+
   return (
     <form onSubmit={handleSubmit}>
       <Grid container spacing={3}>
@@ -1052,11 +1146,7 @@ const getCategoryName = (categoryId) => {
                     fontWeight: 500
                   }}
                 >
-                  {Object.keys(dialogSelectedProducts).length > 0
-                    ? `${Object.keys(dialogSelectedProducts).length} selected`
-                    : (selectedProduct
-                      ? (products.find(p => p.id === selectedProduct)?.name || 'Select Product')
-                      : 'Select Product')}
+                  Select Product
                 </Button>
                 {/* Product Grid Dialog */}
                 <Dialog
@@ -1104,505 +1194,379 @@ const getCategoryName = (categoryId) => {
                         sx={{ minWidth: 220, width: '100%' }}
                       />
                     </Box>
-                    {/* Product Grid View */}
-                    <Box sx={{
-    px: 3,
-    pb: 3,
-    height: 420,
-    overflowY: 'auto'
-  }}>
-    <Grid container spacing={2}>
-      {filteredProducts.map(product => {
-        const selected = dialogSelectedProducts[product.id];
-        const opts = dialogProductOptions[product.id] || {};
-        const productVarieties = product.varieties || [];
-        const productVariants = product.variants || [];
-        return (
-          <Grid item xs={12} sm={6} md={4} lg={3} key={product.id}>
-            <Card
-              variant="outlined"
-              sx={{
-                borderRadius: 3,
-                p: 2,
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                boxShadow: selected ? '0 0 0 2px #1976d2' : 'none',
-                borderColor: selected ? 'primary.main' : '#ede7e3',
-                cursor: 'pointer',
-                transition: 'box-shadow 0.2s'
-              }}
-              onClick={() => handleDialogProductToggle(product.id)}
-            >
-              {product.imageUrl && (
-                <Box
-                  component="img"
-                  src={product.imageUrl}
-                  alt={product.name}
-                  sx={{
-                    width: 80,
-                    height: 80,
-                    objectFit: 'cover',
-                    borderRadius: 2,
-                    mb: 1,
-                    border: '1px solid #eee',
-                    background: '#fafafa'
-                  }}
-                />
-              )}
-              <Typography variant="subtitle1" fontWeight={600} align="center" sx={{ mb: 0.5 }}>
-                {product.name}
-              </Typography>
-              <Typography variant="body2" color="text.secondary" align="center" sx={{ mb: 1 }}>
-                {product.description || ''}
-              </Typography>
-              <Typography variant="caption" color="text.secondary" sx={{ mb: 1 }}>
-                {getCategoryName(product.categoryId)}
-              </Typography>
-              {/* Show available varieties */}
-              {productVarieties.length > 0 && (
-                <Box sx={{ mb: 1, width: '100%' }}>
-                  <Typography variant="caption" color="text.secondary">Varieties:</Typography>
-                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
-                    {productVarieties.map(v => (
-                      <Chip
-                        key={v.name}
-                        label={`${v.name} ₱${Number(v.price).toFixed(2)}`}
-                        size="small"
-                        sx={{
-                          borderRadius: 1,
-                          fontSize: 12,
-                          bgcolor: opts.variety === v.name ? 'primary.main' : undefined,
-                          color: opts.variety === v.name ? 'white' : undefined,
-                          cursor: selected ? 'pointer' : 'not-allowed',
-                          opacity: selected ? 1 : 0.5
-                        }}
-                        onClick={selected ? (e) => {
-                          e.stopPropagation();
-                          handleDialogOptionChange(product.id, 'variety', v.name);
-                        } : undefined}
-                      />
-                    ))}
-                  </Box>
-                </Box>
-              )}
-              {/* Show available variants */}
-              {productVariants.length > 0 && (
-                <Box sx={{ mb: 1, width: '100%' }}>
-                  <Typography variant="caption" color="text.secondary">Variants:</Typography>
-                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
-                    {productVariants.map(variantId => {
-                      const variant = variants.find(v => v.id === variantId);
-                      const price = product.variantPrices?.[variantId];
-                      return (
-                        <Chip
-                          key={variantId}
-                          label={
-                            variant
-                              ? `${variant.name}${typeof price === 'number' ? ` ₱${Number(price).toFixed(2)}` : ''}`
-                              : variantId
-                          }
-                          size="small"
-                          sx={{
-                            borderRadius: 1,
-                            fontSize: 12,
-                            bgcolor: opts.variant === variantId ? 'primary.main' : undefined,
-                            color: opts.variant === variantId ? 'white' : undefined,
-                            cursor: selected ? 'pointer' : 'not-allowed',
-                            opacity: selected ? 1 : 0.5
-                          }}
-                          onClick={selected ? (e) => {
-                            e.stopPropagation();
-                            handleDialogOptionChange(product.id, 'variant', variantId);
-                          } : undefined}
-                        />
-                      );
-                    })}
-                  </Box>
-                </Box>
-              )}
-              {/* Show add-ons */}
-              {addOns.length > 0 && (
-                <Box sx={{ mb: 1, width: '100%' }}>
-                  <Typography variant="caption" color="text.secondary">Add-ons:</Typography>
-                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
-                    {addOns.map(addOn => (
-                      <Chip
-                        key={addOn.id}
-                        label={`${addOn.name}${addOn.price ? ` ₱${Number(addOn.price).toFixed(2)}` : ''}`}
-                        size="small"
-                        sx={{
-                          borderRadius: 1,
-                          fontSize: 12,
-                          bgcolor: opts.addOns && opts.addOns.includes(addOn.id) ? 'primary.main' : '#f5f5f5',
-                          color: opts.addOns && opts.addOns.includes(addOn.id) ? 'white' : '#4e342e',
-                          cursor: selected ? 'pointer' : 'not-allowed',
-                          opacity: selected ? 1 : 0.5
-                        }}
-                        onClick={selected ? (e) => {
-                          e.stopPropagation();
-                          let newAddOns = Array.isArray(opts.addOns) ? [...opts.addOns] : [];
-                          if (newAddOns.includes(addOn.id)) {
-                            newAddOns = newAddOns.filter(id => id !== addOn.id);
-                          } else {
-                            newAddOns.push(addOn.id);
-                          }
-                          handleDialogOptionChange(product.id, 'addOns', newAddOns);
-                        } : undefined}
-                      />
-                    ))}
-                  </Box>
-                </Box>
-              )}
-              <Typography variant="h6" color="primary" fontWeight={700} sx={{ mb: 1 }}>
-                ₱{getProductDialogPrice(product, opts).toFixed(2)}
-              </Typography>
-              {selected ? (
-                <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, width: '100%' }}>
-                  <Button
-                    variant="outlined"
-                    color="error"
-                    size="small"
-                    sx={{ borderRadius: 2, textTransform: 'none', mr: 1, minWidth: 0, px: 1 }}
-                    onClick={e => {
-                      e.stopPropagation();
-                      handleDialogProductToggle(product.id);
-                    }}
-                  >
-                    Unselect
-                  </Button>
-                  <TextField
-                    type="number"
-                    size="small"
-                    label="Qty"
-                    value={opts.qty || 1}
-                    onClick={e => e.stopPropagation()}
-                    onChange={e => handleDialogQuantityChange(product.id, parseInt(e.target.value) || 1)}
-                    inputProps={{ min: 1, style: { width: 40, textAlign: 'center' } }}
-                    sx={{ width: 70 }}
-                  />
-                </Box>
-              ) : (
-                <Button
-                  variant="outlined"
-                  color="primary"
-                  size="small"
-                  sx={{ borderRadius: 2, textTransform: 'none', mt: 1, width: '100%' }}
-                  onClick={e => {
-                    e.stopPropagation();
-                    handleDialogProductToggle(product.id);
-                  }}
-                >
-                  Select
-                </Button>
-              )}
-            </Card>
-          </Grid>
-        );
-      })}
-      {filteredProducts.length === 0 && (
-        <Grid item xs={12}>
-          <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
-            No products found.
-          </Typography>
-        </Grid>
-      )}
-    </Grid>
-  </Box>
+                    {/* Product Small Grid View */}
+                    <Box
+                      sx={{
+                        px: 3,
+                        pb: 3,
+                        height: 420,
+                        overflowY: 'auto'
+                      }}
+                    >
+                      <Grid container spacing={2}>
+                        {filteredProducts.map((product) => (
+                          <Grid
+                            item
+                            xs={6}
+                            sm={4}
+                            md={2}
+                            lg={2}
+                            xl={2}
+                            key={product.id}
+                            sx={{
+                              display: 'flex'
+                            }}
+                          >
+                            <Card
+                              variant="outlined"
+                              sx={{
+                                borderRadius: 3,
+                                p: 2,
+                                height: '100%',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                cursor: 'pointer',
+                                borderColor: '#ede7e3',
+                                transition: 'box-shadow 0.2s',
+                                width: '100%'
+                              }}
+                              onClick={() => handleOpenProductDetail(product)}
+                            >
+                              {product.imageUrl && (
+                                <Box
+                                  component="img"
+                                  src={product.imageUrl}
+                                  alt={product.name}
+                                  sx={{
+                                    width: 60,
+                                    height: 60,
+                                    objectFit: 'cover',
+                                    borderRadius: 2,
+                                    mb: 1,
+                                    border: '1px solid #eee',
+                                    background: '#fafafa'
+                                  }}
+                                />
+                              )}
+                              <Typography variant="subtitle2" fontWeight={600} align="center" sx={{ mb: 0.5 }}>
+                                {product.name}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary" align="center" sx={{ mb: 0.5 }}>
+                                {getCategoryName(product.categoryId)}
+                              </Typography>
+                              <Typography variant="body2" color="primary" fontWeight={700}>
+                                ₱{getProductDisplayPrice(product).toFixed(2)}
+                              </Typography>
+                            </Card>
+                          </Grid>
+                        ))}
+                        {filteredProducts.length === 0 && (
+                          <Grid item xs={12}>
+                            <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
+                              No products found.
+                            </Typography>
+                          </Grid>
+                        )}
+                      </Grid>
+                    </Box>
                   </DialogContent>
                   <DialogActions>
-                    <Button onClick={handleDialogClose}>Cancel</Button>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      disabled={Object.keys(dialogSelectedProducts).length === 0}
-                      onClick={handleDialogConfirm}
-                    >
-                      Confirm Selection
-                    </Button>
+                    <Button onClick={handleDialogClose}>Close</Button>
                   </DialogActions>
                 </Dialog>
                 {/* END Product Grid Dialog */}
 
-                {/* VARIETY DROPDOWN */}
-                <FormControl size="small" sx={{ minWidth: 120 }}>
-                  <InputLabel>Variety</InputLabel>
-                  <Select
-                    label="Variety"
-                    value={selectedVariety}
-                    onChange={e => setSelectedVariety(e.target.value)}
-                    disabled={
-                      !selectedProduct ||
-                      !(products.find(p => p.id === selectedProduct)?.varieties?.length > 0)
-                    }
-                  >
-                    <MenuItem value="">None</MenuItem>
-                    {(products.find(p => p.id === selectedProduct)?.varieties || []).map(v => (
-                      <MenuItem key={v.name} value={v.name}>{v.name}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-
-                {/* VARIANT DROPDOWN */}
-                <FormControl size="small" sx={{ minWidth: 120 }}>
-                  <InputLabel>Variant</InputLabel>
-                  <Select
-                    label="Variant"
-                    value={selectedVariant}
-                    onChange={e => setSelectedVariant(e.target.value)}
-                    disabled={
-                      !selectedProduct ||
-                      !(products.find(p => p.id === selectedProduct)?.variants?.length > 0)
-                    }
-                  >
-                    <MenuItem value="">None</MenuItem>
-                    {(products.find(p => p.id === selectedProduct)?.variants || []).map(variantId => {
-                      const variant = variants.find(v => v.id === variantId);
-                      const product = products.find(p => p.id === selectedProduct);
-                      const variantPrice = product?.variantPrices?.[variantId];
-                      return (
-                        <MenuItem key={variantId} value={variantId}>
-                          {variant ? variant.name : variantId}
-                          {typeof variantPrice === 'number'
-                            ? ` (₱${variantPrice.toFixed(2)})`
-                            : variant && variant.price
-                              ? ` (+₱${Number(variant.price).toFixed(2)})`
-                              : ''}
-                        </MenuItem>
-                      );
-                    })}
-                  </Select>
-                </FormControl>
-                {/* ADD-ONS MULTISELECT */}
-                <FormControl size="small" sx={{ minWidth: 180 }}>
-                  <InputLabel>Add-ons</InputLabel>
-                  <Select
-                    label="Add-ons"
-                    multiple
-                    value={selectedAddOns}
-                    onChange={e => setSelectedAddOns(e.target.value)}
-                    renderValue={selected => addOns.filter(a => selected.includes(a.id)).map(a => a.name).join(', ')}
-                  >
-                    {addOns.map(addOn => (
-                      <MenuItem key={addOn.id} value={addOn.id}>
-                        {addOn.name} {addOn.price ? `(+₱${Number(addOn.price).toFixed(2)})` : ''}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                
-                <TextField
-                  type="number"
-                  label="Quantity"
-                  value={quantity}
-                  onChange={(e) => setQuantity(parseInt(e.target.value) || 0)}
-                  inputProps={{ min: 1 }}
-                  sx={{ 
-                    width: 100,
-                    '& .MuiOutlinedInput-root': {
-                      borderRadius: '12px',
-                      backgroundColor: 'white'
-                    }
-                  }}
-                  size="small"
-                />
-                
-                <Button 
-                  variant="contained" 
-                  onClick={handleAddItem}
-                  startIcon={<AddIcon />}
-                  size="medium"
-                  sx={{
-                    borderRadius: '12px',
-                    textTransform: 'none',
-                    px: 3,
-                    height: '40px',
-                    boxShadow: 'none',
-                    '&:hover': {
-                      boxShadow: 'none',
-                      bgcolor: 'primary.dark'
-                    }
-                  }}
+                {/* Product Detail Dialog */}
+                <Dialog
+                  open={showProductDetailDialog}
+                  onClose={() => setShowProductDetailDialog(false)}
+                  fullWidth
+                  maxWidth="xs"
                 >
-                  Add Item
-                </Button>
-              </Box>
-              
-              {/* Items Table */}
-              {items.length > 0 ? (
-                <TableContainer component={Paper} elevation={0} sx={{
-                  border: '1px solid #ede7e3',
-                  borderRadius: '14px',
-                  overflow: 'hidden',
-                  background: 'rgba(255,255,255,0.97)',
-                  animation: 'fadeIn 1.2s',
-                }}>
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow sx={{
-                        backgroundColor: '#f5f5f5',
-                        '& th': {
-                          fontWeight: 600,
-                          fontSize: '0.95rem',
-                          color: '#4e342e',
-                          borderBottom: 'none'
-                        }
+                  <DialogTitle>
+                    {productDetail?.name}
+                  </DialogTitle>
+                  <DialogContent>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                      {productDetail?.description}
+                    </Typography>
+                    {/* Variety */}
+                    {productDetail?.varieties?.length > 0 && (
+                      <FormControl size="small" fullWidth sx={{ mb: 2 }}>
+                        <InputLabel>Variety</InputLabel>
+                        <Select
+                          label="Variety"
+                          value={productDetailOptions.variety}
+                          onChange={e => setProductDetailOptions(opts => ({ ...opts, variety: e.target.value }))}
+                        >
+                          <MenuItem value="">None</MenuItem>
+                          {productDetail.varieties.map(v => (
+                            <MenuItem key={v.name} value={v.name}>
+                              {v.name} (₱{Number(v.price).toFixed(2)})
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    )}
+                    {/* Variant */}
+                    {productDetail?.variants?.length > 0 && (
+                      <FormControl size="small" fullWidth sx={{ mb: 2 }}>
+                        <InputLabel>Variant</InputLabel>
+                        <Select
+                          label="Variant"
+                          value={productDetailOptions.variant}
+                          onChange={e => setProductDetailOptions(opts => ({ ...opts, variant: e.target.value }))}
+                        >
+                          <MenuItem value="">None</MenuItem>
+                          {productDetail.variants.map(variantId => {
+                            const variant = variants.find(v => v.id === variantId);
+                            const variantPrice = productDetail?.variantPrices?.[variantId];
+                            return (
+                              <MenuItem key={variantId} value={variantId}>
+                                {variant ? variant.name : variantId}
+                                {typeof variantPrice === 'number'
+                                  ? ` (₱${variantPrice.toFixed(2)})`
+                                  : variant && variant.price
+                                    ? ` (+₱${Number(variant.price).toFixed(2)})`
+                                    : ''}
+                              </MenuItem>
+                            );
+                          })}
+                        </Select>
+                      </FormControl>
+                    )}
+                    {/* Add-ons */}
+                    {addOns.length > 0 && (
+                      <FormControl size="small" fullWidth sx={{ mb: 2 }}>
+                        <InputLabel>Add-ons</InputLabel>
+                        <Select
+                          label="Add-ons"
+                          multiple
+                          value={productDetailOptions.addOns}
+                          onChange={e => setProductDetailOptions(opts => ({ ...opts, addOns: e.target.value }))}
+                          renderValue={selected => addOns.filter(a => selected.includes(a.id)).map(a => a.name).join(', ')}
+                        >
+                          {addOns.map(addOn => (
+                            <MenuItem key={addOn.id} value={addOn.id}>
+                              {addOn.name} {addOn.price ? `(+₱${Number(addOn.price).toFixed(2)})` : ''}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    )}
+                    {/* Quantity */}
+                    <TextField
+                      type="number"
+                      label="Quantity"
+                      value={productDetailOptions.qty}
+                      onChange={e => setProductDetailOptions(opts => ({
+                        ...opts,
+                        qty: Math.max(1, parseInt(e.target.value) || 1)
+                      }))}
+                      inputProps={{ min: 1 }}
+                      sx={{ width: 120, mb: 2 }}
+                      size="small"
+                    />
+                    {/* Price */}
+                    <Typography variant="h6" color="primary" fontWeight={700}>
+                      ₱{getProductDetailPrice(productDetail, productDetailOptions).toFixed(2)}
+                      {productDetailOptions.addOns.length > 0 && (
+                        <>
+                          {' + '}
+                          ₱{addOns.filter(a => productDetailOptions.addOns.includes(a.id)).reduce((sum, a) => sum + Number(a.price || 0), 0).toFixed(2)}
+                          {' (Add-ons)'}
+                        </>
+                      )}
+                    </Typography>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setShowProductDetailDialog(false)}>Cancel</Button>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      onClick={handleConfirmProductDetail}
+                    >
+                      Add to Order
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+                {/* END Product Detail Dialog */}
+      </Box>
+      {/* Items Table */}
+      {items.length > 0 ? (
+        <TableContainer component={Paper} elevation={0} sx={{
+          border: '1px solid #ede7e3',
+          borderRadius: '14px',
+          overflow: 'hidden',
+          background: 'rgba(255,255,255,0.97)',
+          animation: 'fadeIn 1.2s',
+        }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow sx={{
+                backgroundColor: '#f5f5f5',
+                '& th': {
+                  fontWeight: 600,
+                  fontSize: '0.95rem',
+                  color: '#4e342e',
+                  borderBottom: 'none'
+                }
+              }}>
+                <TableCell sx={{ borderRadius: '12px 0 0 0' }}>Product</TableCell>
+                <TableCell>Variety</TableCell>
+                <TableCell>Variant</TableCell>
+                <TableCell>Add-ons</TableCell>
+                <TableCell align="right">Price</TableCell>
+                <TableCell align="center">Quantity</TableCell>
+                <TableCell align="right">Total</TableCell>
+                <TableCell align="center" sx={{ borderRadius: '0 12px 0 0' }}>Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {items.map(item => (
+                <TableRow key={item.productId + (item.variantId || '') + (item.addOnIds ? item.addOnIds.join(',') : '')} hover>
+                  <TableCell>
+                    {item.isReward ? (
+                      <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                        <LocalOffer color="success" sx={{ mr: 1 }} />
+                        <Typography fontWeight="500">
+                          {item.name} (FREE)
+                        </Typography>
+                      </Box>
+                    ) : (
+                      <Typography fontWeight="500">
+                        {item.name}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {item.variety || '-'}
+                  </TableCell>
+                  <TableCell>
+                    {item.variantName || '-'}
+                  </TableCell>
+                  <TableCell>
+                    {item.addOnNames && item.addOnNames.length > 0
+                      ? item.addOnNames.join(', ')
+                      : '-'}
+                  </TableCell>
+                  <TableCell align="right">
+                    {item.isReward ? (
+                      <Typography color="success.main" fontStyle="italic">
+                        FREE
+                      </Typography>
+                    ) : (
+                      `₱${item.price.toFixed(2)}`
+                    )}
+                  </TableCell>
+                  <TableCell align="center">
+                    <Box sx={{ 
+                      display: 'flex', 
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}>
+                      <IconButton 
+                        size="small" 
+                        onClick={() => handleUpdateQuantity(item.productId, item.quantity - 1)}
+                        sx={{ 
+                          color: 'error.main',
+                          '&:hover': { backgroundColor: 'rgba(244, 67, 54, 0.08)' }
+                        }}
+                      >
+                        <RemoveIcon fontSize="small" />
+                      </IconButton>
+                      <Typography sx={{ 
+                        mx: 1, 
+                        minWidth: 24, 
+                        textAlign: 'center',
+                        fontWeight: '500'
                       }}>
-                        <TableCell sx={{ borderRadius: '12px 0 0 0' }}>Product</TableCell>
-                        <TableCell>Variety</TableCell>
-                        <TableCell>Variant</TableCell>
-                        <TableCell>Add-ons</TableCell>
-                        <TableCell align="right">Price</TableCell>
-                        <TableCell align="center">Quantity</TableCell>
-                        <TableCell align="right">Total</TableCell>
-                        <TableCell align="center" sx={{ borderRadius: '0 12px 0 0' }}>Actions</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {items.map(item => (
-                        <TableRow key={item.productId + (item.variantId || '') + (item.addOnIds ? item.addOnIds.join(',') : '')} hover>
-                          <TableCell>
-                            {item.isReward ? (
-                              <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                                <LocalOffer color="success" sx={{ mr: 1 }} />
-                                <Typography fontWeight="500">
-                                  {item.name} (FREE)
-                                </Typography>
-                              </Box>
-                            ) : (
-                              <Typography fontWeight="500">
-                                {item.name}
-                              </Typography>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            {item.variety || '-'}
-                          </TableCell>
-                          <TableCell>
-                            {item.variantName || '-'}
-                          </TableCell>
-                          <TableCell>
-                            {item.addOnNames && item.addOnNames.length > 0
-                              ? item.addOnNames.join(', ')
-                              : '-'}
-                          </TableCell>
-                          <TableCell align="right">
-                            {item.isReward ? (
-                              <Typography color="success.main" fontStyle="italic">
-                                FREE
-                              </Typography>
-                            ) : (
-                              `₱${item.price.toFixed(2)}`
-                            )}
-                          </TableCell>
-                          <TableCell align="center">
-                            <Box sx={{ 
-                              display: 'flex', 
-                              alignItems: 'center',
-                              justifyContent: 'center'
-                            }}>
-                              <IconButton 
-                                size="small" 
-                                onClick={() => handleUpdateQuantity(item.productId, item.quantity - 1)}
-                                sx={{ 
-                                  color: 'error.main',
-                                  '&:hover': { backgroundColor: 'rgba(244, 67, 54, 0.08)' }
-                                }}
-                              >
-                                <RemoveIcon fontSize="small" />
-                              </IconButton>
-                              <Typography sx={{ 
-                                mx: 1, 
-                                minWidth: 24, 
-                                textAlign: 'center',
-                                fontWeight: '500'
-                              }}>
-                                {item.quantity}
-                              </Typography>
-                              <IconButton 
-                                size="small" 
-                                onClick={() => handleUpdateQuantity(item.productId, item.quantity + 1)}
-                                sx={{ 
-                                  color: 'success.main',
-                                  '&:hover': { backgroundColor: 'rgba(76, 175, 80, 0.08)' }
-                                }}
-                              >
-                                <AddIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          </TableCell>
-                          <TableCell align="right" sx={{ fontWeight: '500' }}>
-                            {item.isReward ? 'FREE' : `₱${(item.price * item.quantity).toFixed(2)}`}
-                          </TableCell>
-                          <TableCell align="center">
-                            <IconButton 
-                              size="small" 
-                              onClick={() => handleRemoveItem(item.productId)}
-                              sx={{ 
-                                color: 'error.main',
-                                '&:hover': { backgroundColor: 'rgba(244, 67, 54, 0.08)' }
-                              }}
-                            >
-                              <DeleteIcon fontSize="small" />
-                            </IconButton>
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                      <TableRow sx={{ '& td': { borderBottom: 'none' } }}>
-                        <TableCell colSpan={5} align="right" sx={{ 
-                          pt: 3,
-                          fontWeight: '600',
-                          fontSize: '1rem'
-                        }}>
-                          Order Total:
-                        </TableCell>
-                        <TableCell colSpan={2} align="right" sx={{ 
-                          pt: 3,
-                          fontWeight: '600',
-                          fontSize: '1rem'
-                        }}>
-                          <Box>
-                            <Typography>₱{totalAmount.toFixed(2)}</Typography>
-                            {discountApplied > 0 && (
-                              <>
-                                <Typography variant="body2" color="error.main">
-                                  - ₱{discountApplied.toFixed(2)} (Discount)
-                                </Typography>
-                                <Typography variant="subtitle1">
-                                  ₱{(totalAmount - discountApplied).toFixed(2)}
-                                </Typography>
-                              </>
-                            )}
-                          </Box>
-                        </TableCell>
-                      </TableRow>
-                    </TableBody>
-                  </Table>
-                </TableContainer>
-              ) : (
-                <Paper elevation={0} sx={{
-                  p: 4,
-                  textAlign: 'center',
-                  backgroundColor: '#f8f7f5',
-                  borderRadius: '14px',
-                  border: '1px dashed #ede7e3',
-                  animation: 'fadeIn 1.2s',
+                        {item.quantity}
+                      </Typography>
+                      <IconButton 
+                        size="small" 
+                        onClick={() => handleUpdateQuantity(item.productId, item.quantity + 1)}
+                        sx={{ 
+                          color: 'success.main',
+                          '&:hover': { backgroundColor: 'rgba(76, 175, 80, 0.08)' }
+                        }}
+                      >
+                        <AddIcon fontSize="small" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                  <TableCell align="right" sx={{ fontWeight: '500' }}>
+                    {item.isReward ? 'FREE' : `₱${(item.price * item.quantity).toFixed(2)}`}
+                  </TableCell>
+                  <TableCell align="center">
+                    <IconButton 
+                      size="small" 
+                      onClick={() => handleRemoveItem(item.productId)}
+                      sx={{ 
+                        color: 'error.main',
+                        '&:hover': { backgroundColor: 'rgba(244, 67, 54, 0.08)' }
+                      }}
+                    >
+                      <DeleteIcon fontSize="small" />
+                    </IconButton>
+                  </TableCell>
+                </TableRow>
+              ))}
+              <TableRow sx={{ '& td': { borderBottom: 'none' } }}>
+                <TableCell colSpan={5} align="right" sx={{ 
+                  pt: 3,
+                  fontWeight: '600',
+                  fontSize: '1rem'
                 }}>
-                  <LocalCafeIcon sx={{
-                    fontSize: 40,
-                    color: '#bdbdbd',
-                    mb: 1,
-                    opacity: 0.5
-                  }} />
-                  <Typography variant="body1" color="text.secondary">
-                    No items added yet. Start by selecting a product above.
-                  </Typography>
-                </Paper>
-              )}
-            </CardContent>
-          </Card>
-        </Grid>
+                  Order Total:
+                </TableCell>
+                <TableCell colSpan={2} align="right" sx={{ 
+                  pt: 3,
+                  fontWeight: '600',
+                  fontSize: '1rem'
+                }}>
+                  <Box>
+                    <Typography>₱{totalAmount.toFixed(2)}</Typography>
+                    {discountApplied > 0 && (
+                      <>
+                        <Typography variant="body2" color="error.main">
+                          - ₱{discountApplied.toFixed(2)} (Discount)
+                        </Typography>
+                        <Typography variant="subtitle1">
+                          ₱{(totalAmount - discountApplied).toFixed(2)}
+                        </Typography>
+                      </>
+                    )}
+                  </Box>
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </TableContainer>
+      ) : (
+        <Paper elevation={0} sx={{
+          p: 4,
+          textAlign: 'center',
+          backgroundColor: '#f8f7f5',
+          borderRadius: '14px',
+          border: '1px dashed #ede7e3',
+          animation: 'fadeIn 1.2s',
+        }}>
+          <LocalCafeIcon sx={{
+            fontSize: 40,
+            color: '#bdbdbd',
+            mb: 1,
+            opacity: 0.5
+          }} />
+          <Typography variant="body1" color="text.secondary">
+            No items added yet. Start by selecting a product above.
+          </Typography>
+        </Paper>
+      )}
+    </CardContent>
+  </Card>
+</Grid>
 
         {/* Loyalty Rewards Section */}
         <Grid item xs={12} md={6}>
