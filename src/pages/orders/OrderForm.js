@@ -44,6 +44,7 @@ import PersonIcon from '@mui/icons-material/Person';
 import NotesIcon from '@mui/icons-material/Notes';
 import ReceiptIcon from '@mui/icons-material/Receipt';
 import HistoryIcon from '@mui/icons-material/History';
+import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
 import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth, db } from '../../firebase';
 import { 
@@ -101,6 +102,11 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
   const [selectedVariant, setSelectedVariant] = useState('');
   const [selectedAddOns, setSelectedAddOns] = useState([]);
   const [selectedVariety, setSelectedVariety] = useState('');
+  const [showProductDialog, setShowProductDialog] = useState(false);
+  const [dialogSelectedProducts, setDialogSelectedProducts] = useState({});
+  // New: filter and search state for dialog
+  const [dialogCategory, setDialogCategory] = useState('All');
+  const [dialogSearch, setDialogSearch] = useState('');
 
   // Add this useEffect to fetch loyalty rewards
   useEffect(() => {
@@ -651,7 +657,198 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
       setQuantity(1);
     }
   }, [initialProduct]);
-  
+
+  // Helper to get product price for grid view
+  const getProductDisplayPrice = (product) => {
+    if (!product) return 0;
+    if (product.varieties && product.varieties.length > 0) {
+      return Number(product.varieties[0].price);
+    }
+    if (product.variants && product.variants.length > 0 && product.variantPrices) {
+      const firstVariantId = product.variants[0];
+      return typeof product.variantPrices[firstVariantId] === 'number'
+        ? Number(product.variantPrices[firstVariantId])
+        : 0;
+    }
+    return typeof product.basePrice === 'number'
+      ? product.basePrice
+      : (typeof product.price === 'number' ? product.price : 0);
+  };
+
+  // Add state for per-product options in dialog
+const [dialogProductOptions, setDialogProductOptions] = useState({}); // { [productId]: { variety, variant, addOns: [], qty } }
+
+// Helper to get price for a product with options
+const getProductDialogPrice = (product, options = {}) => {
+  if (!product) return 0;
+  // Variety price
+  if (product.varieties && product.varieties.length > 0 && options.variety) {
+    const varietyObj = product.varieties.find(v => v.name === options.variety);
+    return varietyObj ? Number(varietyObj.price) : 0;
+  }
+  // Variant price
+  if (
+    (!product.varieties || product.varieties.length === 0) &&
+    product.variants && product.variants.length > 0 &&
+    options.variant
+  ) {
+    const variantObj = variants.find(v => v.id === options.variant);
+    return typeof product.variantPrices?.[options.variant] === 'number'
+      ? Number(product.variantPrices[options.variant])
+      : (variantObj ? Number(variantObj.price || 0) : 0);
+  }
+  // Fallback
+  return typeof product.basePrice === 'number'
+    ? product.basePrice
+    : (typeof product.price === 'number' ? product.price : 0);
+};
+
+  // Handle dialog product select/unselect
+  const handleDialogProductToggle = (productId) => {
+    setDialogSelectedProducts(prev => {
+      const newSelected = { ...prev };
+      if (newSelected[productId]) {
+        delete newSelected[productId];
+      } else {
+        newSelected[productId] = 1;
+      }
+      return newSelected;
+    });
+    setDialogProductOptions(prev => {
+      const newOpts = { ...prev };
+      if (newOpts[productId]) {
+        delete newOpts[productId];
+      } else {
+        newOpts[productId] = { variety: '', variant: '', addOns: [], qty: 1 };
+      }
+      return newOpts;
+    });
+  };
+
+  // Handle dialog quantity change
+  const handleDialogQuantityChange = (productId, qty) => {
+    setDialogSelectedProducts(prev => ({
+      ...prev,
+      [productId]: Math.max(1, qty)
+    }));
+    setDialogProductOptions(prev => ({
+      ...prev,
+      [productId]: { ...prev[productId], qty: Math.max(1, qty) }
+    }));
+  };
+
+  // Handle dialog variety/variant/addOns change
+  const handleDialogOptionChange = (productId, field, value) => {
+    setDialogProductOptions(prev => ({
+      ...prev,
+      [productId]: {
+        ...prev[productId],
+        [field]: value
+      }
+    }));
+  };
+
+  // Confirm selection: add all selected products with options to order
+  const handleDialogConfirm = () => {
+    const newItems = [];
+    Object.entries(dialogSelectedProducts).forEach(([productId, qty]) => {
+      const product = products.find(p => p.id === productId);
+      if (!product) return;
+      const opts = dialogProductOptions[productId] || {};
+      let itemPrice = getProductDialogPrice(product, opts);
+      // Add-ons
+      const addOnObjs = addOns.filter(a => (opts.addOns || []).includes(a.id));
+      let addOnsTotal = addOnObjs.reduce((sum, a) => sum + Number(a.price || 0), 0);
+      let itemTotalPrice = itemPrice + addOnsTotal;
+      // Variant object
+      let variantObj = opts.variant ? variants.find(v => v.id === opts.variant) : null;
+      // Check if already in items (same product, variant, addOns, variety)
+      const existingIndex = items.findIndex(
+        item =>
+          item.productId === productId &&
+          item.variantId === (variantObj ? variantObj.id : opts.variant || undefined) &&
+          JSON.stringify(item.addOnIds || []) === JSON.stringify((addOnObjs || []).map(a => a.id)) &&
+          item.variety === opts.variety
+      );
+      if (existingIndex >= 0) {
+        items[existingIndex].quantity += opts.qty || qty;
+      } else {
+        newItems.push({
+          productId,
+          name: product.name,
+          price: itemTotalPrice,
+          quantity: opts.qty || qty,
+          variantId: variantObj ? variantObj.id : opts.variant || undefined,
+          variantName: variantObj ? variantObj.name : (() => {
+            const v = variants.find(vv => vv.id === opts.variant);
+            return v ? v.name : undefined;
+          })(),
+          addOnIds: addOnObjs.map(a => a.id),
+          addOnNames: addOnObjs.map(a => a.name),
+          addOns: addOnObjs,
+          variety: opts.variety
+        });
+      }
+    });
+    setItems([...items, ...newItems]);
+    setShowProductDialog(false);
+    setDialogSelectedProducts({});
+    setDialogProductOptions({});
+    setSelectedProduct('');
+    setSelectedVariety('');
+    setSelectedVariant('');
+    setSelectedAddOns([]);
+    setQuantity(1);
+  };
+
+  // Reset dialog state on close
+  const handleDialogClose = () => {
+    setShowProductDialog(false);
+    setDialogSelectedProducts({});
+    setDialogProductOptions({});
+  };
+
+  // Fetch categories for dialog display (for horizontal list)
+const [categories, setCategories] = useState([]);
+useEffect(() => {
+  const fetchCategories = async () => {
+    const q = query(collection(db, 'categories'));
+    const querySnapshot = await getDocs(q);
+    setCategories(querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+  };
+  fetchCategories();
+}, []);
+
+// Get unique categories from products (by categoryId)
+const productCategories = React.useMemo(() => {
+  // Use categories from DB for display
+  return [{ id: 'All', name: 'All' }, ...categories];
+}, [categories]);
+
+// Filtered and searched products for dialog
+const filteredProducts = React.useMemo(() => {
+  let filtered = products.filter(p => p.available !== false);
+  if (dialogCategory && dialogCategory !== 'All') {
+    filtered = filtered.filter(p => p.categoryId === dialogCategory);
+  }
+  if (dialogSearch) {
+    const s = dialogSearch.toLowerCase();
+    filtered = filtered.filter(
+      p =>
+        (p.name && p.name.toLowerCase().includes(s)) ||
+        (p.description && p.description.toLowerCase().includes(s))
+    );
+  }
+  return filtered;
+}, [products, dialogCategory, dialogSearch]);
+
+// Helper to get category name by id
+const getCategoryName = (categoryId) => {
+  if (!categoryId) return '';
+  const cat = categories.find(c => c.id === categoryId);
+  return cat ? cat.name : '';
+};
+
   return (
     <form onSubmit={handleSubmit}>
       <Grid container spacing={3}>
@@ -842,77 +1039,292 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
                 borderRadius: '12px',
                 border: '1px solid #f0edea'
               }}>
-                <Autocomplete
-                  options={products.filter(p => p.available !== false)}
-                  getOptionLabel={(product) => {
-                    if (!product || typeof product !== 'object') return '';
-                    if (typeof product === 'string') return product;
-                    const name = product.name || '';
-                    // Determine price based on selected variety/variant
-                    let price = 0;
-                    // If this product is currently selected, use the selected variety/variant from state
-                    if (selectedProduct === product.id) {
-                      // If product has varieties, use selectedVariety
-                      if (product.varieties && product.varieties.length > 0 && selectedVariety) {
-                        const varietyObj = product.varieties.find(v => v.name === selectedVariety);
-                        price = varietyObj ? Number(varietyObj.price) : 0;
-                      }
-                      // If product has no varieties but has variants, use selectedVariant
-                      else if ((!product.varieties || product.varieties.length === 0) && product.variants && product.variants.length > 0 && selectedVariant) {
-                        price = typeof product.variantPrices?.[selectedVariant] === 'number'
-                          ? Number(product.variantPrices[selectedVariant])
-                          : 0;
-                      }
-                      // Fallback
-                      else {
-                        price = typeof product.basePrice === 'number'
-                          ? product.basePrice
-                          : (typeof product.price === 'number' ? product.price : 0);
-                      }
-                    } else {
-                      // Not selected, show default price (first variety, or first variant, or basePrice/price)
-                      if (product.varieties && product.varieties.length > 0) {
-                        price = Number(product.varieties[0].price);
-                      } else if (product.variants && product.variants.length > 0 && product.variantPrices) {
-                        const firstVariantId = product.variants[0];
-                        price = typeof product.variantPrices[firstVariantId] === 'number'
-                          ? Number(product.variantPrices[firstVariantId])
-                          : 0;
-                      } else {
-                        price = typeof product.basePrice === 'number'
-                          ? product.basePrice
-                          : (typeof product.price === 'number' ? product.price : 0);
-                      }
-                    }
-                    return `${name} - ₱${price.toFixed(2)}`;
+                {/* Product Selection Button */}
+                <Button
+                  variant="outlined"
+                  startIcon={<ShoppingCartIcon />}
+                  onClick={() => setShowProductDialog(true)}
+                  sx={{
+                    borderRadius: '12px',
+                    textTransform: 'none',
+                    minWidth: 200,
+                    backgroundColor: 'white',
+                    fontWeight: 500
                   }}
-                  value={
-                    products.find(p => p.id === selectedProduct) || null
-                  }
-                  onChange={(event, newValue) => {
-                    setSelectedProduct(newValue?.id || '');
-                    setSelectedVariety('');
-                    setSelectedVariant('');
+                >
+                  {Object.keys(dialogSelectedProducts).length > 0
+                    ? `${Object.keys(dialogSelectedProducts).length} selected`
+                    : (selectedProduct
+                      ? (products.find(p => p.id === selectedProduct)?.name || 'Select Product')
+                      : 'Select Product')}
+                </Button>
+                {/* Product Grid Dialog */}
+                <Dialog
+                  open={showProductDialog}
+                  onClose={handleDialogClose}
+                  fullWidth
+                  maxWidth="md"
+                  PaperProps={{
+                    sx: { borderRadius: 4, p: 2 }
                   }}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="Search products..."
-                      variant="outlined"
-                      size="small"
-                      fullWidth
-                      sx={{
-                        '& .MuiOutlinedInput-root': {
-                          borderRadius: '12px',
-                          backgroundColor: 'white'
-                        }
-                      }}
-                    />
-                  )}
-                  sx={{ flex: 1, minWidth: 200 }}
-                  disabled={products.filter(p => p.available !== false).length === 0}
+                >
+                  <DialogTitle>
+                    <Box display="flex" alignItems="center" gap={1}>
+                      <ShoppingCartIcon color="primary" />
+                      <Typography variant="h6" fontWeight={600}>Choose Products</Typography>
+                    </Box>
+                  </DialogTitle>
+                  <DialogContent dividers sx={{ minHeight: 320, maxHeight: 600, p: 0 }}>
+                    {/* Horizontal Category List */}
+                    <Box sx={{ display: 'flex', gap: 1, mb: 2, overflowX: 'auto', pb: 1, px: 3, pt: 3 }}>
+                      {productCategories.map(cat => (
+                        <Chip
+                          key={cat.id}
+                          label={cat.name}
+                          color={dialogCategory === cat.id ? "primary" : "default"}
+                          clickable
+                          onClick={() => setDialogCategory(cat.id)}
+                          sx={{
+                            fontWeight: 600,
+                            borderRadius: 2,
+                            bgcolor: dialogCategory === cat.id ? 'primary.main' : '#f5f5f5',
+                            color: dialogCategory === cat.id ? 'white' : '#4e342e',
+                            minWidth: 80
+                          }}
+                        />
+                      ))}
+                    </Box>
+                    {/* Searchbar */}
+                    <Box sx={{ mb: 2, px: 3 }}>
+                      <TextField
+                        size="small"
+                        label="Search"
+                        value={dialogSearch}
+                        onChange={e => setDialogSearch(e.target.value)}
+                        sx={{ minWidth: 220, width: '100%' }}
+                      />
+                    </Box>
+                    {/* Product Grid View */}
+                    <Box sx={{
+    px: 3,
+    pb: 3,
+    height: 420,
+    overflowY: 'auto'
+  }}>
+    <Grid container spacing={2}>
+      {filteredProducts.map(product => {
+        const selected = dialogSelectedProducts[product.id];
+        const opts = dialogProductOptions[product.id] || {};
+        const productVarieties = product.varieties || [];
+        const productVariants = product.variants || [];
+        return (
+          <Grid item xs={12} sm={6} md={4} lg={3} key={product.id}>
+            <Card
+              variant="outlined"
+              sx={{
+                borderRadius: 3,
+                p: 2,
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                boxShadow: selected ? '0 0 0 2px #1976d2' : 'none',
+                borderColor: selected ? 'primary.main' : '#ede7e3',
+                cursor: 'pointer',
+                transition: 'box-shadow 0.2s'
+              }}
+              onClick={() => handleDialogProductToggle(product.id)}
+            >
+              {product.imageUrl && (
+                <Box
+                  component="img"
+                  src={product.imageUrl}
+                  alt={product.name}
+                  sx={{
+                    width: 80,
+                    height: 80,
+                    objectFit: 'cover',
+                    borderRadius: 2,
+                    mb: 1,
+                    border: '1px solid #eee',
+                    background: '#fafafa'
+                  }}
                 />
-                
+              )}
+              <Typography variant="subtitle1" fontWeight={600} align="center" sx={{ mb: 0.5 }}>
+                {product.name}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" align="center" sx={{ mb: 1 }}>
+                {product.description || ''}
+              </Typography>
+              <Typography variant="caption" color="text.secondary" sx={{ mb: 1 }}>
+                {getCategoryName(product.categoryId)}
+              </Typography>
+              {/* Show available varieties */}
+              {productVarieties.length > 0 && (
+                <Box sx={{ mb: 1, width: '100%' }}>
+                  <Typography variant="caption" color="text.secondary">Varieties:</Typography>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
+                    {productVarieties.map(v => (
+                      <Chip
+                        key={v.name}
+                        label={`${v.name} ₱${Number(v.price).toFixed(2)}`}
+                        size="small"
+                        sx={{
+                          borderRadius: 1,
+                          fontSize: 12,
+                          bgcolor: opts.variety === v.name ? 'primary.main' : undefined,
+                          color: opts.variety === v.name ? 'white' : undefined,
+                          cursor: selected ? 'pointer' : 'not-allowed',
+                          opacity: selected ? 1 : 0.5
+                        }}
+                        onClick={selected ? (e) => {
+                          e.stopPropagation();
+                          handleDialogOptionChange(product.id, 'variety', v.name);
+                        } : undefined}
+                      />
+                    ))}
+                  </Box>
+                </Box>
+              )}
+              {/* Show available variants */}
+              {productVariants.length > 0 && (
+                <Box sx={{ mb: 1, width: '100%' }}>
+                  <Typography variant="caption" color="text.secondary">Variants:</Typography>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
+                    {productVariants.map(variantId => {
+                      const variant = variants.find(v => v.id === variantId);
+                      const price = product.variantPrices?.[variantId];
+                      return (
+                        <Chip
+                          key={variantId}
+                          label={
+                            variant
+                              ? `${variant.name}${typeof price === 'number' ? ` ₱${Number(price).toFixed(2)}` : ''}`
+                              : variantId
+                          }
+                          size="small"
+                          sx={{
+                            borderRadius: 1,
+                            fontSize: 12,
+                            bgcolor: opts.variant === variantId ? 'primary.main' : undefined,
+                            color: opts.variant === variantId ? 'white' : undefined,
+                            cursor: selected ? 'pointer' : 'not-allowed',
+                            opacity: selected ? 1 : 0.5
+                          }}
+                          onClick={selected ? (e) => {
+                            e.stopPropagation();
+                            handleDialogOptionChange(product.id, 'variant', variantId);
+                          } : undefined}
+                        />
+                      );
+                    })}
+                  </Box>
+                </Box>
+              )}
+              {/* Show add-ons */}
+              {addOns.length > 0 && (
+                <Box sx={{ mb: 1, width: '100%' }}>
+                  <Typography variant="caption" color="text.secondary">Add-ons:</Typography>
+                  <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 0.5 }}>
+                    {addOns.map(addOn => (
+                      <Chip
+                        key={addOn.id}
+                        label={`${addOn.name}${addOn.price ? ` ₱${Number(addOn.price).toFixed(2)}` : ''}`}
+                        size="small"
+                        sx={{
+                          borderRadius: 1,
+                          fontSize: 12,
+                          bgcolor: opts.addOns && opts.addOns.includes(addOn.id) ? 'primary.main' : '#f5f5f5',
+                          color: opts.addOns && opts.addOns.includes(addOn.id) ? 'white' : '#4e342e',
+                          cursor: selected ? 'pointer' : 'not-allowed',
+                          opacity: selected ? 1 : 0.5
+                        }}
+                        onClick={selected ? (e) => {
+                          e.stopPropagation();
+                          let newAddOns = Array.isArray(opts.addOns) ? [...opts.addOns] : [];
+                          if (newAddOns.includes(addOn.id)) {
+                            newAddOns = newAddOns.filter(id => id !== addOn.id);
+                          } else {
+                            newAddOns.push(addOn.id);
+                          }
+                          handleDialogOptionChange(product.id, 'addOns', newAddOns);
+                        } : undefined}
+                      />
+                    ))}
+                  </Box>
+                </Box>
+              )}
+              <Typography variant="h6" color="primary" fontWeight={700} sx={{ mb: 1 }}>
+                ₱{getProductDialogPrice(product, opts).toFixed(2)}
+              </Typography>
+              {selected ? (
+                <Box sx={{ display: 'flex', alignItems: 'center', mt: 1, width: '100%' }}>
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    size="small"
+                    sx={{ borderRadius: 2, textTransform: 'none', mr: 1, minWidth: 0, px: 1 }}
+                    onClick={e => {
+                      e.stopPropagation();
+                      handleDialogProductToggle(product.id);
+                    }}
+                  >
+                    Unselect
+                  </Button>
+                  <TextField
+                    type="number"
+                    size="small"
+                    label="Qty"
+                    value={opts.qty || 1}
+                    onClick={e => e.stopPropagation()}
+                    onChange={e => handleDialogQuantityChange(product.id, parseInt(e.target.value) || 1)}
+                    inputProps={{ min: 1, style: { width: 40, textAlign: 'center' } }}
+                    sx={{ width: 70 }}
+                  />
+                </Box>
+              ) : (
+                <Button
+                  variant="outlined"
+                  color="primary"
+                  size="small"
+                  sx={{ borderRadius: 2, textTransform: 'none', mt: 1, width: '100%' }}
+                  onClick={e => {
+                    e.stopPropagation();
+                    handleDialogProductToggle(product.id);
+                  }}
+                >
+                  Select
+                </Button>
+              )}
+            </Card>
+          </Grid>
+        );
+      })}
+      {filteredProducts.length === 0 && (
+        <Grid item xs={12}>
+          <Typography color="text.secondary" align="center" sx={{ py: 4 }}>
+            No products found.
+          </Typography>
+        </Grid>
+      )}
+    </Grid>
+  </Box>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={handleDialogClose}>Cancel</Button>
+                    <Button
+                      variant="contained"
+                      color="primary"
+                      disabled={Object.keys(dialogSelectedProducts).length === 0}
+                      onClick={handleDialogConfirm}
+                    >
+                      Confirm Selection
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+                {/* END Product Grid Dialog */}
+
                 {/* VARIETY DROPDOWN */}
                 <FormControl size="small" sx={{ minWidth: 120 }}>
                   <InputLabel>Variety</InputLabel>
@@ -947,7 +1359,6 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
                     <MenuItem value="">None</MenuItem>
                     {(products.find(p => p.id === selectedProduct)?.variants || []).map(variantId => {
                       const variant = variants.find(v => v.id === variantId);
-                      // Try to get per-product variant price
                       const product = products.find(p => p.id === selectedProduct);
                       const variantPrice = product?.variantPrices?.[variantId];
                       return (
