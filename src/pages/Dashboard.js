@@ -660,7 +660,8 @@ const [showAddMemoDialog, setShowAddMemoDialog] = useState(false);
 const [showAttendanceDialog, setShowAttendanceDialog] = useState(false);
 const [showAllAnnouncementsDialog, setShowAllAnnouncementsDialog] = useState(false);
 const [queue, setQueue] = useState([]);
-const [currentOrder, setCurrentOrder] = useState(null);
+const [currentOrders, setCurrentOrders] = useState([]);
+const [selectedQueueItems, setSelectedQueueItems] = useState([]);
 const [showReservationDialog, setShowReservationDialog] = useState(false);
 const [newReservation, setNewReservation] = useState({
   customerName: '',
@@ -695,11 +696,9 @@ useEffect(() => {
         createdAt: doc.data().createdAt?.toDate()
       }));
       
-      // Set current order if any order is in-progress
-      const inProgressOrder = queueData.find(order => order.status === 'in-progress');
-      if (inProgressOrder) {
-        setCurrentOrder(inProgressOrder);
-      }
+      // Set current orders (all in-progress)
+      const inProgressOrders = queueData.filter(order => order.status === 'in-progress');
+      setCurrentOrders(inProgressOrders);
       
       // Set queue to waiting orders only
       setQueue(queueData.filter(order => order.status === 'waiting'));
@@ -779,16 +778,19 @@ const addToQueue = async (orderId) => {
 };
 
 // Fix the processNextOrder function
-const processNextOrder = async () => {
-  if (queue.length === 0) {
-    showSnackbar('No orders in queue', 'info');
-    return;
-  }
-  
-  const nextOrder = queue[0];
+const processNextOrder = async (orderId = null) => {
   try {
+    const orderToProcess = orderId 
+      ? queue.find(order => order.id === orderId)
+      : queue[0];
+    
+    if (!orderToProcess) {
+      showSnackbar('Order not found in queue', 'error');
+      return;
+    }
+
     // Get the full order details
-    const orderDoc = await getDoc(doc(db, 'orders', nextOrder.orderId));
+    const orderDoc = await getDoc(doc(db, 'orders', orderToProcess.orderId));
     if (!orderDoc.exists()) {
       showSnackbar('Order not found', 'error');
       return;
@@ -796,11 +798,11 @@ const processNextOrder = async () => {
 
     const orderData = orderDoc.data();
     
-    // Update both order and queue documents in a batch
+    // Update both order and queue documents
     const batch = writeBatch(db);
     
     // Update order status
-    const orderRef = doc(db, 'orders', nextOrder.orderId);
+    const orderRef = doc(db, 'orders', orderToProcess.orderId);
     batch.update(orderRef, {
       status: 'in-progress',
       startedAt: serverTimestamp(),
@@ -809,7 +811,7 @@ const processNextOrder = async () => {
     });
     
     // Update queue status
-    const queueRef = doc(db, 'queue', nextOrder.id);
+    const queueRef = doc(db, 'queue', orderToProcess.id);
     batch.update(queueRef, {
       status: 'in-progress',
       processedAt: serverTimestamp(),
@@ -818,17 +820,20 @@ const processNextOrder = async () => {
     
     await batch.commit();
     
-    // Set current order with all necessary data
-    setCurrentOrder({
-      ...nextOrder,
-      ...orderData,
-      id: nextOrder.id
-    });
+    // Add to current orders
+    setCurrentOrders(prev => [
+      ...prev,
+      {
+        ...orderToProcess,
+        ...orderData,
+        id: orderToProcess.id
+      }
+    ]);
     
-    // Update local queue state
-    setQueue(prevQueue => prevQueue.filter(order => order.id !== nextOrder.id));
+    // Remove from waiting queue
+    setQueue(prev => prev.filter(order => order.id !== orderToProcess.id));
     
-    showSnackbar(`Now processing order ${nextOrder.orderId.slice(0, 6)}`, 'success');
+    showSnackbar(`Now processing order ${orderToProcess.orderId.slice(0, 6)}`, 'success');
   } catch (error) {
     console.error('Error processing order:', error);
     showSnackbar('Failed to process order', 'error');
@@ -836,17 +841,18 @@ const processNextOrder = async () => {
 };
 
 // In Dashboard.js, update the completeCurrentOrder function:
-const completeCurrentOrder = async () => {
-  if (!currentOrder) {
-    showSnackbar('No order being processed', 'warning');
-    return;
-  }
-
+const completeCurrentOrder = async (orderId) => {
   try {
+    const orderToComplete = currentOrders.find(order => order.id === orderId);
+    if (!orderToComplete) {
+      showSnackbar('Order not found in processing', 'error');
+      return;
+    }
+
     const batch = writeBatch(db);
     
     // Complete the current order
-    const orderRef = doc(db, 'orders', currentOrder.orderId);
+    const orderRef = doc(db, 'orders', orderToComplete.orderId);
     batch.update(orderRef, {
       status: 'completed',
       completedAt: serverTimestamp(),
@@ -855,7 +861,7 @@ const completeCurrentOrder = async () => {
     });
     
     // Remove from queue
-    const queueRef = doc(db, 'queue', currentOrder.id);
+    const queueRef = doc(db, 'queue', orderToComplete.id);
     batch.delete(queueRef);
     
     await batch.commit();
@@ -863,72 +869,18 @@ const completeCurrentOrder = async () => {
     // Add activity log
     await addDoc(collection(db, 'activityLogs'), {
       type: 'order_completed',
-      description: `Order #${currentOrder.orderId.slice(0, 8)} completed`,
+      description: `Order #${orderToComplete.orderId.slice(0, 8)} completed`,
       userId: user.uid,
       userEmail: user.email,
       userName: user.displayName || user.email,
-      orderId: currentOrder.orderId,
+      orderId: orderToComplete.orderId,
       timestamp: serverTimestamp()
     });
 
-    // Automatically process the next order if available
-    const q = query(
-      collection(db, 'queue'),
-      where('status', '==', 'waiting'),
-      orderBy('createdAt', 'asc'),
-      limit(1)
-    );
+    // Remove from current orders
+    setCurrentOrders(prev => prev.filter(order => order.id !== orderId));
     
-    const nextOrderSnapshot = await getDocs(q);
-    if (!nextOrderSnapshot.empty) {
-      const nextOrderDoc = nextOrderSnapshot.docs[0];
-      const nextOrder = {
-        id: nextOrderDoc.id,
-        ...nextOrderDoc.data(),
-        createdAt: nextOrderDoc.data().createdAt?.toDate()
-      };
-      
-      // Get the full order details
-      const orderDoc = await getDoc(doc(db, 'orders', nextOrder.orderId));
-      if (orderDoc.exists()) {
-        const orderData = orderDoc.data();
-        
-        // Update both order and queue documents in a batch
-        const nextBatch = writeBatch(db);
-        
-        // Update order status
-        const nextOrderRef = doc(db, 'orders', nextOrder.orderId);
-        nextBatch.update(nextOrderRef, {
-          status: 'in-progress',
-          startedAt: serverTimestamp(),
-          assignedTo: user.uid,
-          assignedToName: user.displayName || user.email
-        });
-        
-        // Update queue status
-        const nextQueueRef = doc(db, 'queue', nextOrder.id);
-        nextBatch.update(nextQueueRef, {
-          status: 'in-progress',
-          processedAt: serverTimestamp(),
-          processedBy: user.uid
-        });
-        
-        await nextBatch.commit();
-        
-        // Set current order with all necessary data
-        setCurrentOrder({
-          ...nextOrder,
-          ...orderData,
-          id: nextOrder.id
-        });
-        
-        showSnackbar(`Now processing order ${nextOrder.orderId.slice(0, 6)}`, 'success');
-      }
-    } else {
-      // No more orders in queue
-      setCurrentOrder(null);
-      showSnackbar('Order completed successfully', 'success');
-    }
+    showSnackbar('Order completed successfully', 'success');
   } catch (error) {
     console.error('Error completing order:', error);
     showSnackbar('Failed to complete order', 'error');
@@ -1129,14 +1081,14 @@ const createSupplyRequestNotification = async (request, requestedById) => {
 };
 
 useEffect(() => {
-  if (!currentOrder && queue.length > 0) {
+  if (currentOrders.length === 0 && queue.length > 0) {
     const timer = setTimeout(() => {
       processNextOrder();
     }, 1000); // Small delay to allow state updates
     
     return () => clearTimeout(timer);
   }
-}, [currentOrder, queue]);
+}, [currentOrders, queue]);
 
 /**
  * Creates a notification when a staff member requests a shift swap
@@ -4312,7 +4264,7 @@ const validateShiftStatus = (shift) => {
 
 
 
-      {/* Queue Dialog - Updated to handle multiple orders */}
+      {/* Queue Dialog - Updated for multiple order processing */}
 <Dialog 
   open={showQueueDialog} 
   onClose={() => setShowQueueDialog(false)}
@@ -4329,73 +4281,54 @@ const validateShiftStatus = (shift) => {
   </DialogTitle>
   <DialogContent dividers>
     {/* Current Processing Section */}
-    {currentOrder ? (
-      <Paper elevation={3} sx={{ p: 2, mb: 3, bgcolor: '#e8f5e9' }}>
+    {currentOrders.length > 0 ? (
+      <>
         <Typography variant="h6" gutterBottom>
-          Currently Processing:
+          Currently Processing ({currentOrders.length})
         </Typography>
-        <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Box>
-            <Typography>
-              Order #{currentOrder.orderId?.slice(0, 8)}
-            </Typography>
-            <Typography>
-              Customer: {currentOrder.customerName || 'Walk-in'}
-            </Typography>
-            <Typography>
-              Total: ₱{currentOrder.total?.toFixed(2) || '0.00'}
-            </Typography>
-            <Typography>
-              Items: {currentOrder.items?.length || 0}
-            </Typography>
-            <Typography>
-              Waiting Time: {Math.floor((new Date() - (currentOrder.createdAt instanceof Date ? currentOrder.createdAt : new Date(currentOrder.createdAt))) / (1000 * 60))} minutes
-            </Typography>
-          </Box>
-          <Button 
-  variant="contained" 
-  color="success" 
-  sx={{ height: 'fit-content' }}
-  onClick={async () => {
-    await completeCurrentOrder();
-    // Refresh queue after completion
-    const q = query(
-      collection(db, 'queue'),
-      where('status', 'in', ['waiting', 'in-progress']),
-      orderBy('status'),
-      orderBy('createdAt', 'asc')
-    );
-    const snapshot = await getDocs(q);
-    const queueData = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-      createdAt: doc.data().createdAt?.toDate(),
-      selected: false
-    }));
-    setQueue(queueData.filter(order => order.status === 'waiting'));
-  }}
->
-  Complete Order
-</Button>
-        </Box>
-      </Paper>
+        <TableContainer component={Paper} sx={{ mb: 3 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Order #</TableCell>
+                <TableCell>Customer</TableCell>
+                <TableCell align="right">Total</TableCell>
+                <TableCell align="right">Wait Time</TableCell>
+                <TableCell align="right">Items</TableCell>
+                <TableCell align="right">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {currentOrders.map((order) => (
+                <TableRow key={order.id}>
+                  <TableCell>{order.orderId?.slice(0, 8)}</TableCell>
+                  <TableCell>{order.customerName || 'Walk-in'}</TableCell>
+                  <TableCell align="right">₱{order.total?.toFixed(2) || '0.00'}</TableCell>
+                  <TableCell align="right">
+                    {Math.floor((new Date() - (order.createdAt instanceof Date ? order.createdAt : new Date(order.createdAt))) / (1000 * 60))} min
+                  </TableCell>
+                  <TableCell align="right">{order.items?.length || 0}</TableCell>
+                  <TableCell align="right">
+                    <Button 
+                      variant="contained" 
+                      color="success" 
+                      size="small"
+                      onClick={() => completeCurrentOrder(order.id)}
+                    >
+                      Complete
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </>
     ) : (
       <Box sx={{ textAlign: 'center', mb: 3 }}>
         <Typography variant="h6">
-          No order currently being processed
+          No orders currently being processed
         </Typography>
-        {queue.length > 0 && (
-          <Button 
-            variant="contained" 
-            sx={{ mt: 2 }}
-            onClick={() => {
-              const nextOrder = queue[0];
-              processNextOrder(nextOrder.id);
-            }}
-          >
-            Start Processing Next Order
-          </Button>
-        )}
       </Box>
     )}
 
@@ -4412,16 +4345,12 @@ const validateShiftStatus = (shift) => {
               <TableCell padding="checkbox">
                 <Checkbox
                   indeterminate={
-                    queue.filter(order => order.selected).length > 0 &&
-                    queue.filter(order => order.selected).length < queue.length
+                    selectedQueueItems.length > 0 &&
+                    selectedQueueItems.length < queue.length
                   }
-                  checked={queue.length > 0 && queue.filter(order => order.selected).length === queue.length}
+                  checked={queue.length > 0 && selectedQueueItems.length === queue.length}
                   onChange={(e) => {
-                    const updatedQueue = queue.map(order => ({
-                      ...order,
-                      selected: e.target.checked
-                    }));
-                    setQueue(updatedQueue);
+                    setSelectedQueueItems(e.target.checked ? queue.map(order => order.id) : []);
                   }}
                 />
               </TableCell>
@@ -4434,15 +4363,17 @@ const validateShiftStatus = (shift) => {
             </TableRow>
           </TableHead>
           <TableBody>
-            {queue.map((order, index) => (
-              <TableRow key={order.id} selected={order.selected}>
+            {queue.map((order) => (
+              <TableRow key={order.id} selected={selectedQueueItems.includes(order.id)}>
                 <TableCell padding="checkbox">
                   <Checkbox
-                    checked={order.selected || false}
+                    checked={selectedQueueItems.includes(order.id)}
                     onChange={(e) => {
-                      const updatedQueue = [...queue];
-                      updatedQueue[index].selected = e.target.checked;
-                      setQueue(updatedQueue);
+                      setSelectedQueueItems(prev =>
+                        e.target.checked
+                          ? [...prev, order.id]
+                          : prev.filter(id => id !== order.id)
+                      );
                     }}
                   />
                 </TableCell>
@@ -4455,14 +4386,12 @@ const validateShiftStatus = (shift) => {
                 <TableCell align="right">{order.items?.length || 0}</TableCell>
                 <TableCell align="right">
                   <ButtonGroup size="small">
-                    {!currentOrder && (
-                      <Button 
-                        variant="contained"
-                        onClick={() => processNextOrder(order.id)}
-                      >
-                        Process
-                      </Button>
-                    )}
+                    <Button 
+                      variant="contained"
+                      onClick={() => processNextOrder(order.id)}
+                    >
+                      Process
+                    </Button>
                     <Button 
                       variant="outlined"
                       onClick={async () => {
@@ -4500,51 +4429,18 @@ const validateShiftStatus = (shift) => {
   <DialogActions>
     <Box display="flex" justifyContent="space-between" width="100%">
       <Box>
-        {queue.filter(order => order.selected).length > 0 && (
+        {selectedQueueItems.length > 0 && (
           <Button 
             variant="contained"
             color="primary"
             onClick={() => {
-              const selectedOrders = queue.filter(order => order.selected);
-              if (selectedOrders.length > 0) {
-                // Process all selected orders
-                const batch = writeBatch(db);
-                
-                selectedOrders.forEach(order => {
-                  // Update order status
-                  const orderRef = doc(db, 'orders', order.orderId);
-                  batch.update(orderRef, {
-                    status: 'in-progress',
-                    startedAt: serverTimestamp(),
-                    assignedTo: user.uid,
-                    assignedToName: user.displayName || user.email
-                  });
-                  
-                  // Update queue status
-                  const queueRef = doc(db, 'queue', order.id);
-                  batch.update(queueRef, {
-                    status: 'in-progress',
-                    processedAt: serverTimestamp(),
-                    processedBy: user.uid
-                  });
-                });
-                
-                batch.commit().then(() => {
-                  // Set the first selected order as current
-                  setCurrentOrder({
-                    ...selectedOrders[0],
-                    id: selectedOrders[0].id
-                  });
-                  showSnackbar(`Processing ${selectedOrders.length} orders`, 'success');
-                }).catch(error => {
-                  console.error('Error processing orders:', error);
-                  showSnackbar('Failed to process orders', 'error');
-                });
-              }
+              selectedQueueItems.forEach(orderId => {
+                processNextOrder(orderId);
+              });
+              setSelectedQueueItems([]);
             }}
-            disabled={!!currentOrder}
           >
-            Process Selected ({queue.filter(order => order.selected).length})
+            Process Selected ({selectedQueueItems.length})
           </Button>
         )}
       </Box>
@@ -4564,15 +4460,11 @@ const validateShiftStatus = (shift) => {
               const queueData = snapshot.docs.map(doc => ({
                 id: doc.id,
                 ...doc.data(),
-                createdAt: doc.data().createdAt?.toDate(),
-                selected: false
+                createdAt: doc.data().createdAt?.toDate()
               }));
               
-              // Set current order if any order is in-progress
-              const inProgressOrder = queueData.find(order => order.status === 'in-progress');
-              if (inProgressOrder) {
-                setCurrentOrder(inProgressOrder);
-              }
+              // Set current orders (all in-progress)
+              setCurrentOrders(queueData.filter(order => order.status === 'in-progress'));
               
               // Set queue to waiting orders only
               setQueue(queueData.filter(order => order.status === 'waiting'));
@@ -8028,7 +7920,7 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
 </Dialog>
 
 
-{/* Queue Dialog - Updated to handle multiple orders */}
+{/* Queue Dialog - Updated for multiple order processing */}
 <Dialog 
   open={showQueueDialog} 
   onClose={() => setShowQueueDialog(false)}
@@ -8045,73 +7937,54 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
   </DialogTitle>
   <DialogContent dividers>
     {/* Current Processing Section */}
-    {currentOrder ? (
-      <Paper elevation={3} sx={{ p: 2, mb: 3, bgcolor: '#e8f5e9' }}>
+    {currentOrders.length > 0 ? (
+      <>
         <Typography variant="h6" gutterBottom>
-          Currently Processing:
+          Currently Processing ({currentOrders.length})
         </Typography>
-        <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Box>
-            <Typography>
-              Order #{currentOrder.orderId?.slice(0, 8)}
-            </Typography>
-            <Typography>
-              Customer: {currentOrder.customerName || 'Walk-in'}
-            </Typography>
-            <Typography>
-              Total: ₱{currentOrder.total?.toFixed(2) || '0.00'}
-            </Typography>
-            <Typography>
-              Items: {currentOrder.items?.length || 0}
-            </Typography>
-            <Typography>
-              Waiting Time: {Math.floor((new Date() - (currentOrder.createdAt instanceof Date ? currentOrder.createdAt : new Date(currentOrder.createdAt))) / (1000 * 60))} minutes
-            </Typography>
-          </Box>
-          <Button 
-  variant="contained" 
-  color="success" 
-  sx={{ height: 'fit-content' }}
-  onClick={async () => {
-    await completeCurrentOrder();
-    // Refresh queue after completion
-    const q = query(
-      collection(db, 'queue'),
-      where('status', 'in', ['waiting', 'in-progress']),
-      orderBy('status'),
-      orderBy('createdAt', 'asc')
-    );
-    const snapshot = await getDocs(q);
-    const queueData = snapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-      createdAt: doc.data().createdAt?.toDate(),
-      selected: false
-    }));
-    setQueue(queueData.filter(order => order.status === 'waiting'));
-  }}
->
-  Complete Order
-</Button>
-        </Box>
-      </Paper>
+        <TableContainer component={Paper} sx={{ mb: 3 }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Order #</TableCell>
+                <TableCell>Customer</TableCell>
+                <TableCell align="right">Total</TableCell>
+                <TableCell align="right">Wait Time</TableCell>
+                <TableCell align="right">Items</TableCell>
+                <TableCell align="right">Actions</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {currentOrders.map((order) => (
+                <TableRow key={order.id}>
+                  <TableCell>{order.orderId?.slice(0, 8)}</TableCell>
+                  <TableCell>{order.customerName || 'Walk-in'}</TableCell>
+                  <TableCell align="right">₱{order.total?.toFixed(2) || '0.00'}</TableCell>
+                  <TableCell align="right">
+                    {Math.floor((new Date() - (order.createdAt instanceof Date ? order.createdAt : new Date(order.createdAt))) / (1000 * 60))} min
+                  </TableCell>
+                  <TableCell align="right">{order.items?.length || 0}</TableCell>
+                  <TableCell align="right">
+                    <Button 
+                      variant="contained" 
+                      color="success" 
+                      size="small"
+                      onClick={() => completeCurrentOrder(order.id)}
+                    >
+                      Complete
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </>
     ) : (
       <Box sx={{ textAlign: 'center', mb: 3 }}>
         <Typography variant="h6">
-          No order currently being processed
+          No orders currently being processed
         </Typography>
-        {queue.length > 0 && (
-          <Button 
-            variant="contained" 
-            sx={{ mt: 2 }}
-            onClick={() => {
-              const nextOrder = queue[0];
-              processNextOrder(nextOrder.id);
-            }}
-          >
-            Start Processing Next Order
-          </Button>
-        )}
       </Box>
     )}
 
@@ -8128,16 +8001,12 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
               <TableCell padding="checkbox">
                 <Checkbox
                   indeterminate={
-                    queue.filter(order => order.selected).length > 0 &&
-                    queue.filter(order => order.selected).length < queue.length
+                    selectedQueueItems.length > 0 &&
+                    selectedQueueItems.length < queue.length
                   }
-                  checked={queue.length > 0 && queue.filter(order => order.selected).length === queue.length}
+                  checked={queue.length > 0 && selectedQueueItems.length === queue.length}
                   onChange={(e) => {
-                    const updatedQueue = queue.map(order => ({
-                      ...order,
-                      selected: e.target.checked
-                    }));
-                    setQueue(updatedQueue);
+                    setSelectedQueueItems(e.target.checked ? queue.map(order => order.id) : []);
                   }}
                 />
               </TableCell>
@@ -8150,15 +8019,17 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
             </TableRow>
           </TableHead>
           <TableBody>
-            {queue.map((order, index) => (
-              <TableRow key={order.id} selected={order.selected}>
+            {queue.map((order) => (
+              <TableRow key={order.id} selected={selectedQueueItems.includes(order.id)}>
                 <TableCell padding="checkbox">
                   <Checkbox
-                    checked={order.selected || false}
+                    checked={selectedQueueItems.includes(order.id)}
                     onChange={(e) => {
-                      const updatedQueue = [...queue];
-                      updatedQueue[index].selected = e.target.checked;
-                      setQueue(updatedQueue);
+                      setSelectedQueueItems(prev =>
+                        e.target.checked
+                          ? [...prev, order.id]
+                          : prev.filter(id => id !== order.id)
+                      );
                     }}
                   />
                 </TableCell>
@@ -8171,14 +8042,12 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
                 <TableCell align="right">{order.items?.length || 0}</TableCell>
                 <TableCell align="right">
                   <ButtonGroup size="small">
-                    {!currentOrder && (
-                      <Button 
-                        variant="contained"
-                        onClick={() => processNextOrder(order.id)}
-                      >
-                        Process
-                      </Button>
-                    )}
+                    <Button 
+                      variant="contained"
+                      onClick={() => processNextOrder(order.id)}
+                    >
+                      Process
+                    </Button>
                     <Button 
                       variant="outlined"
                       onClick={async () => {
@@ -8216,51 +8085,18 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
   <DialogActions>
     <Box display="flex" justifyContent="space-between" width="100%">
       <Box>
-        {queue.filter(order => order.selected).length > 0 && (
+        {selectedQueueItems.length > 0 && (
           <Button 
             variant="contained"
             color="primary"
             onClick={() => {
-              const selectedOrders = queue.filter(order => order.selected);
-              if (selectedOrders.length > 0) {
-                // Process all selected orders
-                const batch = writeBatch(db);
-                
-                selectedOrders.forEach(order => {
-                  // Update order status
-                  const orderRef = doc(db, 'orders', order.orderId);
-                  batch.update(orderRef, {
-                    status: 'in-progress',
-                    startedAt: serverTimestamp(),
-                    assignedTo: user.uid,
-                    assignedToName: user.displayName || user.email
-                  });
-                  
-                  // Update queue status
-                  const queueRef = doc(db, 'queue', order.id);
-                  batch.update(queueRef, {
-                    status: 'in-progress',
-                    processedAt: serverTimestamp(),
-                    processedBy: user.uid
-                  });
-                });
-                
-                batch.commit().then(() => {
-                  // Set the first selected order as current
-                  setCurrentOrder({
-                    ...selectedOrders[0],
-                    id: selectedOrders[0].id
-                  });
-                  showSnackbar(`Processing ${selectedOrders.length} orders`, 'success');
-                }).catch(error => {
-                  console.error('Error processing orders:', error);
-                  showSnackbar('Failed to process orders', 'error');
-                });
-              }
+              selectedQueueItems.forEach(orderId => {
+                processNextOrder(orderId);
+              });
+              setSelectedQueueItems([]);
             }}
-            disabled={!!currentOrder}
           >
-            Process Selected ({queue.filter(order => order.selected).length})
+            Process Selected ({selectedQueueItems.length})
           </Button>
         )}
       </Box>
@@ -8280,15 +8116,11 @@ const requestRef = doc(db, 'shiftSwapRequests', requestId);
               const queueData = snapshot.docs.map(doc => ({
                 id: doc.id,
                 ...doc.data(),
-                createdAt: doc.data().createdAt?.toDate(),
-                selected: false
+                createdAt: doc.data().createdAt?.toDate()
               }));
               
-              // Set current order if any order is in-progress
-              const inProgressOrder = queueData.find(order => order.status === 'in-progress');
-              if (inProgressOrder) {
-                setCurrentOrder(inProgressOrder);
-              }
+              // Set current orders (all in-progress)
+              setCurrentOrders(queueData.filter(order => order.status === 'in-progress'));
               
               // Set queue to waiting orders only
               setQueue(queueData.filter(order => order.status === 'waiting'));
