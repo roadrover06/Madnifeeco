@@ -1,5 +1,5 @@
 // src/pages/orders/OrderProcessing.js
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Box, 
   Typography, 
@@ -22,9 +22,11 @@ import {
   Grid,
   MenuItem,
   InputAdornment,
+  FormControl,
+  InputLabel,
+  Select,
 } from '@mui/material';
 import LocalOffer from '@mui/icons-material/LocalOffer';
-
 import { 
   Check as CheckIcon, 
   Close as CloseIcon,
@@ -38,106 +40,190 @@ import { useAuthState } from 'react-firebase-hooks/auth';
 import { auth } from '../../firebase';
 import { format } from 'date-fns';
 import Receipt from '../../components/Receipt';
-
+import { Dialog as MuiDialog } from '@mui/material';
 
 const OrderProcessing = ({
   order,
   onClose,
   onUpdate,
   onProcessPayment,
-  isProcessingPayment
+  onNewOrder
 }) => {
   const [user] = useAuthState(auth);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState('cash');
+  const [manualDiscountType, setManualDiscountType] = useState('fixed');
+  const [manualDiscountValue, setManualDiscountValue] = useState('');
+  const [serviceFee, setServiceFee] = useState('');
+  const [shippingFee, setShippingFee] = useState('');
+  const [showPaymentSummary, setShowPaymentSummary] = useState(false);
+  const [lastPayment, setLastPayment] = useState(null);
   const [userData, setUserData] = useState(null);
+  const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
-  // Add this useEffect to fetch user data
-React.useEffect(() => {
-  const fetchUserData = async () => {
-    if (!user) return;
-    const docRef = doc(db, 'users', user.uid);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      setUserData(docSnap.data());
+  // For printing, refs to hidden DOM nodes
+  const receiptRef = useRef(null);
+  const orderSlipRef = useRef(null);
+
+  useEffect(() => {
+    const fetchUserData = async () => {
+      if (!user) return;
+      const docRef = doc(db, 'users', user.uid);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        setUserData(docSnap.data());
+      }
+    };
+
+    fetchUserData();
+  }, [user]);
+
+  const handleProcessOrder = async (status) => {
+    try {
+      const updateData = {
+        status,
+        updatedAt: serverTimestamp()
+      };
+
+      if (status === 'completed') {
+        updateData.completedBy = user.uid;
+        updateData.completedByName = userData?.firstName || user.email.split('@')[0];
+      }
+
+      await updateDoc(doc(db, 'orders', order.id), updateData);
+
+      await addDoc(collection(db, 'activityLogs'), {
+        type: status === 'completed' ? 'order_completed' : 'order_cancelled',
+        description: `Order #${order.id.slice(0, 8)} ${status}`,
+        userId: user.uid,
+        userEmail: user.email,
+        userName: userData?.firstName || user.email.split('@')[0],
+        orderId: order.id,
+        timestamp: serverTimestamp()
+      });
+
+      onUpdate();
+      onClose();
+    } catch (error) {
+      console.error('Error updating order:', error);
     }
   };
 
-  fetchUserData();
-}, [user]);
-
-  const handleProcessOrder = async (status) => {
-  try {
-    const updateData = {
-      status,
-      updatedAt: serverTimestamp()
-    };
-
-    if (status === 'completed') {
-      updateData.completedBy = user.uid;
-      updateData.completedByName = userData?.firstName || user.email.split('@')[0];
-    }
-
-    await updateDoc(doc(db, 'orders', order.id), updateData);
-
-    // Add activity log
-    await addDoc(collection(db, 'activityLogs'), {
-      type: status === 'completed' ? 'order_completed' : 'order_cancelled',
-      description: `Order #${order.id.slice(0, 8)} ${status}`,
-      userId: user.uid,
-      userEmail: user.email,
-      userName: userData?.firstName || user.email.split('@')[0],
-      orderId: order.id,
-      timestamp: serverTimestamp()
+  const quickAmounts = [1, 5, 10, 20, 50, 100, 200, 500, 1000];
+  const handleQuickAmount = (amt) => {
+    setPaymentAmount((prev) => {
+      const val = parseFloat(prev) || 0;
+      return (val + amt).toString();
     });
+  };
 
-    onUpdate();
-    onClose();
-  } catch (error) {
-    console.error('Error updating order:', error);
+  // Calculate all fees and discounts
+  const parsedDiscount = parseFloat(manualDiscountValue) || 0;
+  const baseSubtotal = order.total || 0;
+  
+  let manualDiscount = 0;
+  if (manualDiscountType === 'fixed') {
+    manualDiscount = parsedDiscount;
+  } else if (manualDiscountType === 'percentage') {
+    manualDiscount = baseSubtotal * (parsedDiscount / 100);
   }
-};
+  
+  const parsedServiceFee = parseFloat(serviceFee) || 0;
+  const parsedShippingFee = parseFloat(shippingFee) || 0;
 
-  // Only use internal payment handler if no onProcessPayment prop
+  // Adjusted total with all fees and discounts
+  const adjustedTotal =
+    baseSubtotal -
+    (order.discountApplied || 0) -
+    manualDiscount +
+    parsedServiceFee +
+    parsedShippingFee;
+
+  const minAmount = adjustedTotal;
+  const enteredAmount = parseFloat(paymentAmount) || 0;
+  // const liveChangeDue = paymentAmount ? (enteredAmount - minAmount).toFixed(2) : '';
+
+  // --- Print Receipt ---
+  const printReceipt = () => {
+    const printContents = receiptRef.current;
+    if (!printContents) return;
+    const printWindow = window.open('', '', 'width=400,height=600');
+    printWindow.document.write('<html><head><title>Receipt</title>');
+    printWindow.document.write('<style>body{font-family:Arial,sans-serif;width:80mm;margin:0 auto;padding:10px;} .receipt-header{text-align:center;margin-bottom:10px;} .receipt-footer{text-align:center;margin-top:10px;} table{width:100%;border-collapse:collapse;} td{padding:3px 0;vertical-align:top;} .text-right{text-align:right;} .text-bold{font-weight:bold;} .text-error{color:#d32f2f;} .item-details{font-size:11px;color:#666;margin-left:8px;display:block;} .item-base{font-size:12px;color:#222;} .item-addon{font-size:11px;color:#666;margin-left:12px;display:block;} hr{border:0;border-top:1px dashed #000;margin:10px 0;}</style>');
+    printWindow.document.write('</head><body>');
+    printWindow.document.write(printContents.innerHTML);
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+      printWindow.close();
+    }, 300);
+  };
+
+  // --- Print Order Slip ---
+  const printOrderSlip = () => {
+    const printContents = orderSlipRef.current;
+    if (!printContents) return;
+    const printWindow = window.open('', '', 'width=400,height=600');
+    printWindow.document.write('<html><head><title>Order Slip</title>');
+    printWindow.document.write('<style>body{font-family:Arial,sans-serif;width:80mm;margin:0 auto;padding:10px;} .header{text-align:center;margin-bottom:10px;} table{width:100%;border-collapse:collapse;} td{padding:3px 0;} .bold{font-weight:bold;} hr{border:0;border-top:1px dashed #000;margin:10px 0;}</style>');
+    printWindow.document.write('</head><body>');
+    printWindow.document.write(printContents.innerHTML);
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+    printWindow.focus();
+    setTimeout(() => {
+      printWindow.print();
+      printWindow.close();
+    }, 300);
+  };
+
   const handlePayment = async () => {
-    if (onProcessPayment) {
-      // Use external handler (from OrderForm)
-      onProcessPayment({
-        amount: parseFloat(paymentAmount),
-        method: paymentMethod
-      });
+    if (!paymentAmount || isNaN(parseFloat(paymentAmount)) || parseFloat(paymentAmount) < minAmount) {
       return;
     }
-    const amount = parseFloat(paymentAmount);
-    if (isNaN(amount) || amount < order.total) {
-      alert(`Payment amount must be at least ₱${order.total.toFixed(2)}`);
-      return;
-    }
-
+    
     try {
-      // Update order with payment details and mark as paid
-      await updateDoc(doc(db, 'orders', order.id), {
-        payment: {
-          amount: amount,
-          method: paymentMethod,
-          date: serverTimestamp(),
-          processedBy: user.uid,
-          processedByName: userData?.firstName || user.email.split('@')[0]
-        },
-        status: 'paid',
-        updatedAt: serverTimestamp()
-      });
+      setIsProcessingPayment(true);
+      
+      const paymentData = {
+        amount: parseFloat(paymentAmount),
+        method: paymentMethod,
+        date: serverTimestamp(),
+        processedBy: user?.uid,
+        processedByName: userData?.firstName || user?.email?.split('@')[0],
+        manualDiscountType,
+        manualDiscountValue: parsedDiscount,
+        manualDiscount,
+        serviceFee: parsedServiceFee,
+        shippingFee: parsedShippingFee,
+        adjustedTotal
+      };
 
+      if (onProcessPayment) {
+        await onProcessPayment(paymentData);
+      } else {
+        await updateDoc(doc(db, 'orders', order.id), {
+          payment: paymentData,
+          status: 'paid',
+          updatedAt: serverTimestamp()
+        });
+      }
+
+      setLastPayment(paymentData);
+      setShowPaymentSummary(true);
+      
       // Add to queue collection
       await addDoc(collection(db, 'queue'), {
         orderId: order.id,
         status: 'waiting',
         createdAt: serverTimestamp(),
         customerName: order.customerName || 'Walk-in',
-        total: order.total,
+        total: adjustedTotal,
         items: order.items,
         payment: {
-          amount: amount,
+          amount: parseFloat(paymentAmount),
           method: paymentMethod
         }
       });
@@ -149,260 +235,188 @@ React.useEffect(() => {
         userId: user.uid,
         userEmail: user.email,
         userName: userData?.firstName || user.email.split('@')[0],
-        amount: amount,
+        amount: parseFloat(paymentAmount),
         orderId: order.id,
         timestamp: serverTimestamp()
       });
 
-      onUpdate();
-      onClose();
     } catch (error) {
       console.error('Error processing payment:', error);
-      alert('Error processing payment. Please try again.');
+    } finally {
+      setIsProcessingPayment(false);
     }
   };
 
-  // --- CHANGE DUE CALCULATION (live for input) ---
-  const baseTotal = order.total || 0;
-  const minAmount = baseTotal - (order.discountApplied || 0);
-  const enteredAmount = parseFloat(paymentAmount) || 0;
-  const liveChangeDue = paymentAmount ? (enteredAmount - minAmount).toFixed(2) : '';
-
-  // --- PRINT RECEIPT: Show base price, add-ons, and payment method ---
-  const printReceipt = () => {
-    const printWindow = window.open('', '_blank');
-    printWindow.document.write(`
-      <html>
-        <head>
-          <title>Receipt for Order #${order.id.slice(0, 8)}</title>
-          <style>
-            body { font-family: Arial, sans-serif; width: 80mm; margin: 0 auto; padding: 10px; }
-            .receipt-header { text-align: center; margin-bottom: 10px; }
-            .receipt-footer { text-align: center; margin-top: 10px; }
-            table { width: 100%; border-collapse: collapse; }
-            td { padding: 3px 0; vertical-align: top; }
-            .text-right { text-align: right; }
-            .text-bold { font-weight: bold; }
-            .text-error { color: #d32f2f; }
-            .item-details { font-size: 11px; color: #666; margin-left: 8px; display: block; }
-            .item-base { font-size: 12px; color: #222; }
-            .item-addon { font-size: 11px; color: #666; margin-left: 12px; display: block; }
-            hr { border: 0; border-top: 1px dashed #000; margin: 10px 0; }
-          </style>
-        </head>
-        <body>
-    `);
-
-    const createdAtDate =
-      order.createdAt && order.createdAt instanceof Date
-        ? order.createdAt
-        : (order.createdAt && order.createdAt.toDate
-          ? order.createdAt.toDate()
-          : new Date());
-
-    printWindow.document.write(`
-      <div class="receipt-header">
-        <h3>Madnifeeco</h3>
-        <p>530 Conch St., Tondo Manila</p>
-        <p>Tel: (123) 456-7890</p>
-      </div>
-      <hr>
-      <p>Order #: ${order.id.slice(0, 8)}</p>
-      <p>Date: ${format(createdAtDate, 'MMM dd, yyyy HH:mm')}</p>
-      <p>Customer: ${order.customerName || 'Walk-in'}</p>
-      <hr>
-      <table>
-        <tbody>
-          ${order.items.map((item) => {
-            // Base price (with variety/variant)
-            let baseDesc = `${item.isReward ? '<strong>FREE:</strong> ' : ''}${item.quantity}x ${item.name}`;
-            if (item.variety) baseDesc += ` <span class="item-details">Variety: ${item.variety}</span>`;
-            if (item.variantName) baseDesc += ` <span class="item-details">Variant: ${item.variantName}${typeof item.variantPrice !== 'undefined' && item.variantPrice !== null ? ` (+₱${Number(item.variantPrice).toFixed(2)})` : ''}</span>`;
-            // Add-ons
-            let addOnsHtml = '';
-            if (item.addOns && item.addOns.length > 0) {
-              addOnsHtml = item.addOns.map(addOn =>
-                `<span class="item-addon">Add-on: ${addOn.name}${typeof addOn.price !== 'undefined' && addOn.price !== null ? ` (+₱${Number(addOn.price).toFixed(2)})` : ''}</span>`
-              ).join('');
-            } else if (item.addOnNames && item.addOnNames.length > 0) {
-              addOnsHtml = `<span class="item-addon">Add-ons: ${item.addOnNames.join(', ')}</span>`;
-            }
-            // Price breakdown
-            const basePrice = (item.price - ((item.addOns || []).reduce((sum, a) => sum + (a.price || 0), 0)));
-            const addOnsTotal = (item.addOns || []).reduce((sum, a) => sum + (a.price || 0), 0);
-            return `
-<tr>
-  <td>
-    <span class="item-base">${baseDesc}</span>
-    ${addOnsHtml}
-  </td>
-  <td class="text-right">
-    ${item.isReward ? 'FREE' : `
-      ₱${(basePrice * item.quantity).toFixed(2)}
-      ${addOnsTotal > 0 ? `<br/><span class="item-addon">Add-ons: ₱${(addOnsTotal * item.quantity).toFixed(2)}</span>` : ''}
-    `}
-  </td>
-</tr>
-`;
-          }).join('')}
-          ${order.discountApplied > 0 ? `
-            <tr>
-              <td class="text-error">${order.rewardUsed || 'Discount'}:</td>
-              <td class="text-right text-error">-₱${order.discountApplied.toFixed(2)}</td>
-            </tr>
-          ` : ''}
-          <tr>
-            <td class="text-bold">Subtotal:</td>
-            <td class="text-right text-bold">₱${order.total?.toFixed(2) || '0.00'}</td>
-          </tr>
-          ${order.pointsEarned > 0 ? `
-            <tr>
-              <td>Points Earned:</td>
-              <td class="text-right">+${order.pointsEarned} pts</td>
-            </tr>
-          ` : ''}
-          ${order.pointsDeducted > 0 ? `
-            <tr>
-              <td>Points Redeemed:</td>
-              <td class="text-right">-${order.pointsDeducted} pts</td>
-            </tr>
-          ` : ''}
-          ${order.payment ? `
-            <tr>
-              <td>Tax:</td>
-              <td class="text-right">₱0.00</td>
-            </tr>
-            <tr>
-              <td class="text-bold">Total:</td>
-              <td class="text-right text-bold">₱${order.total?.toFixed(2) || '0.00'}</td>
-            </tr>
-            <tr>
-              <td>Payment Method:</td>
-              <td class="text-right">
-                ${order.payment.method
-                  ? (order.payment.method.charAt(0).toUpperCase() + order.payment.method.slice(1))
-                  : 'N/A'
-                }
-              </td>
-            </tr>
-            <tr>
-              <td>Amount Tendered:</td>
-              <td class="text-right">
-                ₱${order.payment.amount !== undefined && order.payment.amount !== null ? Number(order.payment.amount).toFixed(2) : '0.00'}
-              </td>
-            </tr>
-            <tr>
-              <td class="text-bold">Change Due:</td>
-              <td class="text-right text-bold">
-                ₱${order.payment.amount !== undefined && order.payment.amount !== null ? (order.payment.amount - order.total).toFixed(2) : '0.00'}
-              </td>
-            </tr>
-          ` : ''}
-        </tbody>
-      </table>
-      <hr>
-      <div class="receipt-footer">
-        <p>Thank you for your visit!</p>
-        <p>Please come again</p>
-      </div>
-    `);
-
-    printWindow.document.write('</body></html>');
-    printWindow.document.close();
-    printWindow.onload = function() {
-      setTimeout(() => {
-        printWindow.print();
-        printWindow.close();
-      }, 500);
-    };
-  };
-
-  // Helper to calculate base and add-on prices for an item
   function getBaseAndAddOnPrice(item) {
-    // If item is a reward, prices are 0
-    if (item.isReward) {
-      return { base: 0, addOns: 0 };
+    let base = Number(item.basePrice || item.price || 0);
+    let addOns = 0;
+    if (item.addOns && Array.isArray(item.addOns)) {
+      addOns = item.addOns.reduce((sum, ao) => sum + Number(ao.price || 0), 0);
     }
-    // Calculate add-ons total
-    const addOns = (item.addOns || []).reduce((sum, a) => sum + (a.price || 0), 0);
-    // Base price is item.price minus add-ons
-    const base = (typeof item.price === 'number' ? item.price : 0) - addOns;
+    if (item.variantPrice) {
+      base += Number(item.variantPrice);
+    }
     return { base, addOns };
   }
 
-  // Helper to render item details for dialog and receipt
-  function renderItemDetails(item) {
-    // For dialog: returns array of JSX elements
-    const details = [];
-    details.push(
-      <span key="name">{item.name}</span>
-    );
-    if (item.variantName) {
-    details.push(
-      <div key="variant" style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
-      Variant: {item.variantName}
-      {item.variantPrice ? ` (+₱${item.variantPrice.toFixed(2)})` : ''}
-    </div>
-    );
-}
-    if (item.addOns && item.addOns.length > 0) {
-      item.addOns.forEach((addOn, idx) => {
-        details.push(
-          <div key={`addon-${idx}`} style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
-            Add-on: {addOn.name}
-            {addOn.price ? ` (+₱${addOn.price.toFixed(2)})` : ''}
+  // --- Live display values for payment info ---
+  const livePaymentMethod = paymentMethod || (order.payment?.method ?? '-');
+  const liveAmountTendered = paymentAmount !== '' ? Number(paymentAmount).toFixed(2) : (order.payment?.amount !== undefined ? Number(order.payment.amount).toFixed(2) : '-');
+  const liveChangeDue = paymentAmount !== '' ? (enteredAmount - minAmount).toFixed(2) : (order.payment?.amount !== undefined ? (Number(order.payment.amount) - Number(order.payment.adjustedTotal ?? order.total ?? 0)).toFixed(2) : '-');
+
+  // --- Fix createdAt display ---
+  const createdAtDate = order.createdAt?.toDate ? order.createdAt.toDate() : (order.createdAt ? new Date(order.createdAt) : null);
+
+  const displayPaymentMethod =
+    order.payment?.method
+      ? order.payment.method.charAt(0).toUpperCase() + order.payment.method.slice(1)
+      : order.status === 'paid'
+        ? 'N/A'
+        : '-';
+
+  const displayAmountTendered =
+    order.payment?.amount !== undefined
+      ? Number(order.payment.amount).toFixed(2)
+      : order.status === 'paid'
+        ? '0.00'
+        : '-';
+
+  const displayChangeDue =
+    order.payment?.amount !== undefined && order.payment?.amount !== null
+      ? (Number(order.payment.amount) - Number(order.payment.adjustedTotal ?? order.total ?? 0)).toFixed(2)
+      : order.status === 'paid'
+        ? '0.00'
+        : '-';
+
+  const changeDue =
+    order.payment?.amount !== undefined && order.payment?.amount !== null
+      ? (Number(order.payment.amount) - Number(order.payment.adjustedTotal ?? order.total ?? 0)).toFixed(2)
+      : '0.00';
+
+  return (
+    <>
+      {/* Hidden receipt for printing */}
+      <div style={{ display: 'none' }}>
+        <div id="print-receipt-content" ref={receiptRef}>
+          <div className="receipt-header" style={{ textAlign: 'center', marginBottom: 10 }}>
+            <h2 style={{ margin: 0, fontWeight: 900, letterSpacing: 2, color: '#6f4e37' }}>Madnifeeco</h2>
+            <div style={{ fontSize: 13, color: '#333', marginBottom: 2 }}>530 Conch St., Tondo Manila</div>
+            <div style={{ fontSize: 12, color: '#888', marginBottom: 2 }}>Order #{order.id?.slice(0, 8)}</div>
+            <div style={{ fontSize: 12, color: '#888', marginBottom: 2 }}>{createdAtDate ? format(createdAtDate, 'MMM dd, yyyy HH:mm') : ''}</div>
+            <hr style={{ border: 0, borderTop: '1.5px dashed #bdbdbd', margin: '10px 0' }} />
           </div>
-        );
-      });
-    } else if (item.addOnNames && item.addOnNames.length > 0) {
-      // fallback for legacy addOnNames (no price)
-      details.push(
-        <div key="addon-names" style={{ fontSize: 12, color: '#666', marginLeft: 8 }}>
-          Add-ons: {item.addOnNames.join(', ')}
+          <table style={{ width: '100%', fontSize: 13 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid #eee' }}>
+                <th align="left">Item</th>
+                <th align="right">Base</th>
+                <th align="right">Add-ons</th>
+                <th align="center">Qty</th>
+                <th align="right">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {order.items.map((item, idx) => {
+                const { base, addOns } = getBaseAndAddOnPrice(item);
+                return (
+                  <tr key={idx} style={{ borderBottom: '1px dotted #e0e0e0' }}>
+                    <td>
+                      <span style={{ fontWeight: 600 }}>{item.name}</span>
+                      {item.variety && <span style={{ display: 'block', fontSize: 11, color: '#888' }}>Variety: {item.variety}</span>}
+                      {item.variantName && <span style={{ display: 'block', fontSize: 11, color: '#888' }}>Variant: {item.variantName}</span>}
+                    </td>
+                    <td align="right">{item.isReward ? <span style={{ color: '#43a047', fontWeight: 700 }}>FREE</span> : `₱${base.toFixed(2)}`}</td>
+                    <td align="right">{item.isReward ? <span style={{ color: '#43a047', fontWeight: 700 }}>FREE</span> : (addOns > 0 ? `₱${addOns.toFixed(2)}` : '-')}</td>
+                    <td align="center">{item.quantity}</td>
+                    <td align="right">{item.isReward ? <span style={{ color: '#43a047', fontWeight: 700 }}>FREE</span> : `₱${(item.price * item.quantity).toFixed(2)}`}</td>
+                  </tr>
+                );
+              })}
+              {order.discountApplied > 0 && (
+                <tr>
+                  <td colSpan={4} align="right" style={{ color: '#d32f2f', fontWeight: 600 }}>{order.rewardUsed || 'Discount'}:</td>
+                  <td align="right" style={{ color: '#d32f2f', fontWeight: 600 }}>-₱{order.discountApplied.toFixed(2)}</td>
+                </tr>
+              )}
+              {manualDiscount > 0 && (
+                <tr>
+                  <td colSpan={4} align="right" style={{ color: '#d32f2f', fontWeight: 600 }}>Manual Discount:</td>
+                  <td align="right" style={{ color: '#d32f2f', fontWeight: 600 }}>-₱{manualDiscount.toFixed(2)}</td>
+                </tr>
+              )}
+              {parsedServiceFee > 0 && (
+                <tr>
+                  <td colSpan={4} align="right" style={{ color: '#6f4e37' }}>Service Fee:</td>
+                  <td align="right" style={{ color: '#6f4e37' }}>₱{parsedServiceFee.toFixed(2)}</td>
+                </tr>
+              )}
+              {parsedShippingFee > 0 && (
+                <tr>
+                  <td colSpan={4} align="right" style={{ color: '#6f4e37' }}>Shipping Fee:</td>
+                  <td align="right" style={{ color: '#6f4e37' }}>₱{parsedShippingFee.toFixed(2)}</td>
+                </tr>
+              )}
+              <tr>
+                <td colSpan={4} align="right" style={{ fontWeight: 700, borderTop: '1.5px solid #bdbdbd', paddingTop: 6 }}>Subtotal:</td>
+                <td align="right" style={{ fontWeight: 700, borderTop: '1.5px solid #bdbdbd', paddingTop: 6 }}>₱{order.total?.toFixed(2) || '0.00'}</td>
+              </tr>
+              <tr>
+                <td colSpan={4} align="right" style={{ fontWeight: 700 }}>Adjusted Total:</td>
+                <td align="right" style={{ fontWeight: 700 }}>₱{adjustedTotal.toFixed(2)}</td>
+              </tr>
+              <tr>
+                <td colSpan={4} align="right">Payment Method:</td>
+                <td align="right">{livePaymentMethod.charAt(0).toUpperCase() + livePaymentMethod.slice(1)}</td>
+              </tr>
+              <tr>
+                <td colSpan={4} align="right">Amount Tendered:</td>
+                <td align="right">₱{liveAmountTendered}</td>
+              </tr>
+              <tr>
+                <td colSpan={4} align="right" style={{ fontWeight: 700 }}>Change Due:</td>
+                <td align="right" style={{ fontWeight: 700 }}>₱{liveChangeDue}</td>
+              </tr>
+            </tbody>
+          </table>
+          <hr style={{ border: 0, borderTop: '1.5px dashed #bdbdbd', margin: '10px 0' }} />
+          <div className="receipt-footer" style={{ textAlign: 'center', fontSize: 13, color: '#6f4e37', fontWeight: 600, marginTop: 10 }}>
+            Thank you for your purchase!<br />
+            <span style={{ fontSize: 11, color: '#888' }}>Follow us on Facebook: <b>Madnifeeco</b></span>
+          </div>
         </div>
-      );
-    }
-    return details;
-  }
-
-  // Calculate change if payment exists
-    const changeDue = order.payment 
-      ? (order.payment.amount - order.total).toFixed(2)
-      : 0;
-
-    // Fix date display for createdAt
-    const createdAtDate =
-      order.createdAt && order.createdAt instanceof Date
-        ? order.createdAt
-        : (order.createdAt && order.createdAt.toDate
-          ? order.createdAt.toDate()
-          : new Date());
-
-    // --- DYNAMIC PAYMENT METHOD, AMOUNT, CHANGE DUE ---
-    // For table display, use live values if payment is pending, else use order.payment
-    // These must be inside the component and after all state/props are defined
-    const displayPaymentMethod = order && order.status === 'pending'
-      ? (paymentMethod ? paymentMethod.charAt(0).toUpperCase() + paymentMethod.slice(1) : 'Cash')
-      : (order && order.payment && order.payment.method
-          ? order.payment.method.charAt(0).toUpperCase() + order.payment.method.slice(1)
-          : 'N/A');
-    const displayAmountTendered = order && order.status === 'pending'
-      ? (paymentAmount ? Number(paymentAmount).toFixed(2) : '0.00')
-      : (order && order.payment && typeof order.payment.amount !== 'undefined'
-          ? Number(order.payment.amount).toFixed(2)
-          : '0.00');
-    const displayChangeDue = order && order.status === 'pending'
-      ? (paymentAmount
-          ? (parseFloat(paymentAmount) - (order.total - (order.discountApplied || 0))).toFixed(2)
-          : '0.00')
-      : (order && order.payment && typeof order.payment.amount !== 'undefined'
-          ? (order.payment.amount - order.total).toFixed(2)
-          : '0.00');
-
-    return (
-      <Dialog
+      </div>
+      {/* Hidden order slip for printing */}
+      <div style={{ display: 'none' }}>
+        <div id="print-order-slip-content" ref={orderSlipRef}>
+          <div className="header">
+            <h3>Order Slip</h3>
+            <div>Order #{order.id?.slice(0, 8)}</div>
+            <div>{createdAtDate ? format(createdAtDate, 'MMM dd, yyyy HH:mm') : ''}</div>
+            <hr />
+          </div>
+          <table>
+            <tbody>
+              {order.items.map((item, idx) => (
+                <tr key={idx}>
+                  <td>
+                    <span className="item-base">{item.name}</span>
+                    {item.variety && <span className="item-details">Variety: {item.variety}</span>}
+                    {item.variantName && <span className="item-details">Variant: {item.variantName}</span>}
+                  </td>
+                  <td className="text-right">{item.quantity}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <hr />
+          <div className="receipt-footer">
+            Please prepare the above items.
+          </div>
+        </div>
+      </div>
+      {/* Main Dialog */}
+      <MuiDialog
         open={true}
-        // Only allow closing via Cancel Order if payment is pending
         onClose={order.status === 'pending' ? undefined : onClose}
         maxWidth="md"
         fullWidth
@@ -542,7 +556,6 @@ React.useEffect(() => {
                         </TableRow>
                       );
                     })}
-                    {/* Add rewards/discounts display */}
                     {order.discountApplied > 0 && (
                       <TableRow>
                         <TableCell colSpan={3} align="right">
@@ -550,10 +563,44 @@ React.useEffect(() => {
                             {order.rewardUsed || 'Discount'}:
                           </Typography>
                         </TableCell>
+                          <TableCell align="right">
+                            <Typography color="error">
+                              -₱{order.discountApplied.toFixed(2)}
+                            </Typography>
+                          </TableCell>
+                        </TableRow>
+                    )}
+                    {manualDiscount > 0 && (
+                      <TableRow>
+                        <TableCell colSpan={3} align="right">
+                          <Typography color="error">
+                            Manual Discount:
+                          </Typography>
+                        </TableCell>
                         <TableCell align="right">
                           <Typography color="error">
-                            -₱{order.discountApplied.toFixed(2)}
+                            -₱{manualDiscount.toFixed(2)}
                           </Typography>
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    {parsedServiceFee > 0 && (
+                      <TableRow>
+                        <TableCell colSpan={3} align="right">
+                          Service Fee:
+                        </TableCell>
+                        <TableCell align="right">
+                          ₱{parsedServiceFee.toFixed(2)}
+                        </TableCell>
+                      </TableRow>
+                    )}
+                    {parsedShippingFee > 0 && (
+                      <TableRow>
+                        <TableCell colSpan={3} align="right">
+                          Shipping Fee:
+                        </TableCell>
+                        <TableCell align="right">
+                          ₱{parsedShippingFee.toFixed(2)}
                         </TableCell>
                       </TableRow>
                     )}
@@ -565,8 +612,14 @@ React.useEffect(() => {
                         <strong>₱{order.total?.toFixed(2) || '0.00'}</strong>
                       </TableCell>
                     </TableRow>
-                    
-                    {/* Show points earned/deducted if available */}
+                    <TableRow>
+                      <TableCell colSpan={3} align="right">
+                        <strong>Adjusted Total:</strong>
+                      </TableCell>
+                      <TableCell align="right">
+                        <strong>₱{adjustedTotal.toFixed(2)}</strong>
+                      </TableCell>
+                    </TableRow>
                     {(order.pointsEarned > 0 || order.pointsDeducted > 0) && (
                       <>
                         {order.pointsEarned > 0 && (
@@ -591,25 +644,28 @@ React.useEffect(() => {
                         )}
                       </>
                     )}
-                    {/* --- DYNAMIC PAYMENT METHOD, AMOUNT, CHANGE DUE --- */}
                     <TableRow>
-                      <TableCell colSpan={3} align="right">Payment Method:</TableCell>
-                      <TableCell align="right">
-                        {displayPaymentMethod}
+                      <TableCell colSpan={3} align="right">
+                        Payment Method:
+                      </TableCell>
+                      <TableCell align="right" colSpan={2}>
+                        {livePaymentMethod.charAt(0).toUpperCase() + livePaymentMethod.slice(1)}
                       </TableCell>
                     </TableRow>
                     <TableRow>
-                      <TableCell colSpan={3} align="right">Amount Tendered:</TableCell>
-                      <TableCell align="right">
-                        ₱{displayAmountTendered}
+                      <TableCell colSpan={3} align="right">
+                        Amount Tendered:
+                      </TableCell>
+                      <TableCell align="right" colSpan={2}>
+                        ₱{liveAmountTendered}
                       </TableCell>
                     </TableRow>
                     <TableRow>
                       <TableCell colSpan={3} align="right">
                         <strong>Change Due:</strong>
                       </TableCell>
-                      <TableCell align="right">
-                        <strong>₱{displayChangeDue}</strong>
+                      <TableCell align="right" colSpan={2}>
+                        <strong>₱{liveChangeDue}</strong>
                       </TableCell>
                     </TableRow>
                   </TableBody>
@@ -646,6 +702,82 @@ React.useEffect(() => {
                       )}
                     </Box>
                   )}
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="body2" sx={{ mb: 1 }}>Quick Amount:</Typography>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                      {quickAmounts.map((amt) => (
+                        <Button
+                          key={amt}
+                          variant="outlined"
+                          size="small"
+                          onClick={() => handleQuickAmount(amt)}
+                          sx={{ minWidth: 48, borderRadius: 2, fontWeight: 600 }}
+                        >
+                          ₱{amt}
+                        </Button>
+                      ))}
+                    </Box>
+                  </Box>
+                  <Box sx={{ mb: 2, display: 'flex', gap: 1 }}>
+                    <FormControl size="small" sx={{ minWidth: 120 }}>
+                      <InputLabel>Discount Type</InputLabel>
+                      <Select
+                        label="Discount Type"
+                        value={manualDiscountType}
+                        onChange={e => setManualDiscountType(e.target.value)}
+                      >
+                        <MenuItem value="fixed">Discount (Fixed)</MenuItem>
+                        <MenuItem value="percentage">Discount (%)</MenuItem>
+                      </Select>
+                    </FormControl>
+                    <TextField
+                      size="small"
+                      label={manualDiscountType === 'fixed' ? 'Amount' : 'Percent'}
+                      type="number"
+                      value={manualDiscountValue}
+                      onChange={e => setManualDiscountValue(e.target.value)}
+                      InputProps={{
+                        endAdornment: manualDiscountType === 'percentage'
+                          ? <InputAdornment position="end">%</InputAdornment>
+                          : <InputAdornment position="end">₱</InputAdornment>
+                      }}
+                      sx={{ minWidth: 120 }}
+                    />
+                    <Box sx={{ alignSelf: 'center', ml: 1 }}>
+                      <Typography variant="body2" color="success.main">
+                        -₱{manualDiscount.toFixed(2)}
+                      </Typography>
+                    </Box>
+                  </Box>
+                  <Box sx={{ mb: 2, display: 'flex', gap: 1 }}>
+                    <TextField
+                      size="small"
+                      label="Service Fee"
+                      type="number"
+                      value={serviceFee}
+                      onChange={e => setServiceFee(e.target.value)}
+                      InputProps={{
+                        startAdornment: <InputAdornment position="start">₱</InputAdornment>
+                      }}
+                      sx={{ minWidth: 120 }}
+                    />
+                    <TextField
+                      size="small"
+                      label="Shipping Fee"
+                      type="number"
+                      value={shippingFee}
+                      onChange={e => setShippingFee(e.target.value)}
+                      InputProps={{
+                        startAdornment: <InputAdornment position="start">₱</InputAdornment>
+                      }}
+                      sx={{ minWidth: 120 }}
+                    />
+                  </Box>
+                  <Box sx={{ mb: 2 }}>
+                    <Typography variant="body2" color="primary">
+                      <strong>Adjusted Total: ₱{adjustedTotal.toFixed(2)}</strong>
+                    </Typography>
+                  </Box>
                   <TextField
                     fullWidth
                     label="Amount"
@@ -678,13 +810,11 @@ React.useEffect(() => {
                     <MenuItem value="mobile">Mobile Payment</MenuItem>
                     <MenuItem value="gcash">GCash</MenuItem>
                   </TextField>
-                  {/* Show payment method immediately */}
                   <Box sx={{ mb: 2 }}>
                     <Typography variant="body2" color="primary">
                       Payment Method: <strong>{paymentMethod.charAt(0).toUpperCase() + paymentMethod.slice(1)}</strong>
                     </Typography>
                   </Box>
-                  {/* Show live change due */}
                   {paymentAmount && !isNaN(enteredAmount) && (
                     <Box sx={{ mb: 2 }}>
                       <Typography variant="body2" color={enteredAmount < minAmount ? "error" : "success.main"}>
@@ -761,7 +891,7 @@ React.useEffect(() => {
                   )}
                   <Box sx={{ mb: 2 }}>
                     <Typography variant="body2">
-                      <strong>Status:</strong> Completed
+                      <strong>Status:</strong> {order.status}
                     </Typography>
                     <Typography variant="body2">
                       <strong>Payment Method:</strong> {order.payment?.method?.charAt(0).toUpperCase() + order.payment?.method?.slice(1) || 'N/A'}
@@ -778,73 +908,129 @@ React.useEffect(() => {
                   </Box>
                 </Paper>
               )}
-              <Paper elevation={0} sx={{
-                p: 3, borderRadius: 3, background: 'rgba(255,255,255,0.97)', border: '1.5px solid #ede7e3'
-              }}>
-                <Typography variant="subtitle1" gutterBottom sx={{ color: '#5d4037', fontWeight: 600 }}>
-                  Order Actions
-                </Typography>
-                <Box display="flex" gap={1} mb={2}>
-                  {order.status === 'pending' && (
-                    <Button
-                      variant="outlined"
-                      color="error"
-                      startIcon={<CloseIcon />}
-                      onClick={() => handleProcessOrder('cancelled')}
-                      sx={{ borderRadius: 2, fontWeight: 600 }}
-                    >
-                      Cancel Order
-                    </Button>
-                  )}
-                  <Button
-                    variant="outlined"
-                    startIcon={<PrintIcon />}
-                    onClick={printReceipt}
-                    sx={{ borderRadius: 2, fontWeight: 600 }}
-                  >
-                    Print Receipt
-                  </Button>
-                </Box>
-              </Paper>
             </Grid>
           </Grid>
         </DialogContent>
-        {/* DialogActions: Remove Close button if payment is pending */}
-        {order.status === 'pending' ? (
-          <DialogActions
-            sx={{
-              background: 'rgba(255,255,255,0.95)',
-              borderBottomLeftRadius: 16,
-              borderBottomRightRadius: 16,
-              px: 4, py: 2
-            }}
-          >
-            {/* No Close button here. Only Cancel Order is available in Order Actions above. */}
+        <DialogActions
+          sx={{
+            background: 'rgba(255,255,255,0.95)',
+            borderBottomLeftRadius: 16,
+            borderBottomRightRadius: 16,
+            px: 4, py: 2
+          }}
+        >
+          <Button onClick={onClose} sx={{
+            borderRadius: 2,
+            color: '#4e342e',
+            fontWeight: 600,
+            px: 3,
+            py: 1,
+            background: 'rgba(255,255,255,0.7)',
+            '&:hover': { background: '#f5f0e6' }
+          }}>
+            Close
+          </Button>
+        </DialogActions>
+        <MuiDialog
+          open={showPaymentSummary}
+          onClose={() => setShowPaymentSummary(false)}
+          maxWidth="xs"
+          fullWidth
+        >
+          <DialogTitle>Payment Successful</DialogTitle>
+          <DialogContent>
+            <Typography variant="body1" sx={{ mb: 2 }}>
+              Payment for Order #{order.id.slice(0, 8)} was successful.
+            </Typography>
+            <Table size="small">
+              <TableBody>
+                <TableRow>
+                  <TableCell>Subtotal</TableCell>
+                  <TableCell align="right">₱{Number(baseSubtotal).toFixed(2)}</TableCell>
+                </TableRow>
+                {order.discountApplied > 0 && (
+                  <TableRow>
+                    <TableCell>Reward Discount</TableCell>
+                    <TableCell align="right">-₱{Number(order.discountApplied).toFixed(2)}</TableCell>
+                  </TableRow>
+                )}
+                {manualDiscount > 0 && (
+                  <TableRow>
+                    <TableCell>Manual Discount</TableCell>
+                    <TableCell align="right">-₱{Number(manualDiscount).toFixed(2)}</TableCell>
+                  </TableRow>
+                )}
+                {parsedServiceFee > 0 && (
+                  <TableRow>
+                    <TableCell>Service Fee</TableCell>
+                    <TableCell align="right">₱{Number(parsedServiceFee).toFixed(2)}</TableCell>
+                  </TableRow>
+                )}
+                {parsedShippingFee > 0 && (
+                  <TableRow>
+                    <TableCell>Shipping Fee</TableCell>
+                    <TableCell align="right">₱{Number(parsedShippingFee).toFixed(2)}</TableCell>
+                  </TableRow>
+                )}
+                <TableRow>
+                  <TableCell><strong>Total</strong></TableCell>
+                  <TableCell align="right"><strong>₱{Number(adjustedTotal).toFixed(2)}</strong></TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell>Amount Paid</TableCell>
+                  <TableCell align="right">
+                    ₱{Number(lastPayment?.amount ?? paymentAmount ?? 0).toFixed(2)}
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell>Change Due</TableCell>
+                  <TableCell align="right">
+                    ₱{Number(
+                      (lastPayment?.amount ?? paymentAmount ?? 0) - Number(adjustedTotal)
+                    ).toFixed(2)}
+                  </TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell>Payment Method</TableCell>
+                  <TableCell align="right">
+                    {(lastPayment?.method || paymentMethod).charAt(0).toUpperCase() +
+                      (lastPayment?.method || paymentMethod).slice(1)}
+                  </TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+          </DialogContent>
+          <DialogActions>
+            <Button
+              variant="outlined"
+              onClick={printReceipt}
+              startIcon={<PrintIcon />}
+            >
+              Print Receipt
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={printOrderSlip}
+              startIcon={<PrintIcon />}
+            >
+              Print Order Slip
+            </Button>
+            <Button
+              variant="contained"
+              color="success"
+              onClick={() => {
+                setShowPaymentSummary(false);
+                if (onNewOrder) onNewOrder();
+                if (onClose) onClose();
+              }}
+            >
+              New Order
+            </Button>
           </DialogActions>
-        ) : (
-          <DialogActions
-            sx={{
-              background: 'rgba(255,255,255,0.95)',
-              borderBottomLeftRadius: 16,
-              borderBottomRightRadius: 16,
-              px: 4, py: 2
-            }}
-          >
-              <Button onClick={onClose} sx={{
-                borderRadius: 2,
-                color: '#4e342e',
-                fontWeight: 600,
-                px: 3,
-                py: 1,
-                background: 'rgba(255,255,255,0.7)',
-                '&:hover': { background: '#f5f0e6' }
-              }}>
-                Close
-              </Button>
-            </DialogActions>
-          )}
-        </Dialog>
-    );
-  };
-  
-  export default OrderProcessing;
+        </MuiDialog>
+      </MuiDialog>
+    </>
+  );
+};
+
+export default OrderProcessing;

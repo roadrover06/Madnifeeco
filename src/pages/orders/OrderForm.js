@@ -665,8 +665,20 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
   const [paymentOrder, setPaymentOrder] = useState(null);
   const [isProcessingPayment, setIsProcessingPayment] = useState(false);
 
+  // Add state to store payment summary fields
+  const [lastPaymentFields, setLastPaymentFields] = useState(null);
+
   // Handler to process payment (mimics OrderProcessing.js logic)
-  const handleProcessPayment = async ({ amount, method }) => {
+  const handleProcessPayment = async ({
+    amount,
+    method,
+    manualDiscountType,
+    manualDiscountValue,
+    manualDiscount,
+    serviceFee,
+    shippingFee,
+    adjustedTotal
+  }) => {
     if (!paymentOrder) return;
     setIsProcessingPayment(true);
     try {
@@ -677,7 +689,13 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
           method: method,
           date: serverTimestamp(),
           processedBy: user.uid,
-          processedByName: userData?.firstName || user.email.split('@')[0]
+          processedByName: userData?.firstName || user.email.split('@')[0],
+          manualDiscountType: manualDiscountType || null,
+          manualDiscountValue: manualDiscountValue || null,
+          manualDiscount: manualDiscount || null,
+          serviceFee: serviceFee || null,
+          shippingFee: shippingFee || null,
+          adjustedTotal: adjustedTotal || null
         },
         status: 'paid',
         updatedAt: serverTimestamp()
@@ -689,7 +707,7 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
         status: 'waiting',
         createdAt: serverTimestamp(),
         customerName: paymentOrder.customerName || 'Walk-in',
-        total: paymentOrder.total,
+        total: adjustedTotal || paymentOrder.total,
         items: paymentOrder.items,
         payment: {
           amount: amount,
@@ -709,20 +727,21 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
         timestamp: serverTimestamp()
       });
 
-      // Print receipt and close dialog after printing
-      printReceiptForOrder({
-        ...paymentOrder,
-        payment: { amount, method },
-        createdAt: paymentOrder.createdAt && paymentOrder.createdAt.toDate
-          ? paymentOrder.createdAt.toDate()
-          : (paymentOrder.createdAt instanceof Date
-            ? paymentOrder.createdAt
-            : new Date())
-      }, () => {
-        setIsProcessingPayment(false);
-        setPaymentOrder(null);
-        if (onSubmit) onSubmit();
+      // Store payment fields for summary dialog
+      setLastPaymentFields({
+        amount,
+        method,
+        manualDiscountType,
+        manualDiscountValue,
+        manualDiscount,
+        serviceFee,
+        shippingFee,
+        adjustedTotal
       });
+
+      // Instead of printing receipt, show payment summary dialog (handled in OrderProcessing)
+      setIsProcessingPayment(false);
+      // Do not close paymentOrder yet; let OrderProcessing handle dialog flow
 
     } catch (error) {
       setIsProcessingPayment(false);
@@ -731,7 +750,20 @@ const OrderForm = ({ products, onSubmit, onCancel, initialProduct }) => {
     }
   };
 
-  // Helper to print receipt and close dialog after printing
+  // Handler for "New Order" button in payment summary dialog
+  const handleNewOrder = () => {
+    setPaymentOrder(null);
+    setLastPaymentFields(null);
+    setSelectedReward(null);
+    setDiscountApplied(0);
+    setItems([]);
+    setCustomerName('');
+    setNotes('');
+    // Optionally call onSubmit to refresh parent if needed
+    if (onSubmit) onSubmit();
+  };
+
+  // Add this at the bottom of your OrderForm component
   const printReceiptForOrder = (order, onPrinted) => {
     const printWindow = window.open('', '_blank');
     printWindow.document.write(`
@@ -2385,6 +2417,7 @@ const handleRemoveMultiConfirmItem = (idx) => {
               onUpdate={() => {}}
               onProcessPayment={handleProcessPayment}
               isProcessingPayment={isProcessingPayment}
+              onNewOrder={handleNewOrder}
             />
           )}
       </form>
