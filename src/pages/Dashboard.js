@@ -62,7 +62,7 @@ import {
 import {
   LocalCafe, People, Inventory, Receipt, AttachMoney,
   Star, Note, Edit, Close, Check, Announcement,
-  Report, ShoppingCart, Schedule, AccessTime, Refresh
+  Report, ShoppingCart, Schedule, AccessTime, Refresh, SearchOff
 } from '@mui/icons-material';
 import { format, isToday } from 'date-fns';
 import { CalendarToday, SwapHoriz } from '@mui/icons-material';
@@ -113,6 +113,9 @@ const Dashboard = () => {
   start: format(new Date(), 'yyyy-MM-dd'),
   end: format(new Date(), 'yyyy-MM-dd')
 });
+const [showCustomerSearchDialog, setShowCustomerSearchDialog] = useState(false);
+const [dialogCustomerSearch, setDialogCustomerSearch] = useState('');
+const [dialogCustomerResults, setDialogCustomerResults] = useState([]);
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [recentActivity, setRecentActivity] = useState([]);
   const [shiftNotes, setShiftNotes] = useState('');
@@ -642,6 +645,7 @@ const [wasteRecords, setWasteRecords] = useState([]);
 const [internalMemos, setInternalMemos] = useState([]);
 const [dailyTasks, setDailyTasks] = useState([]);
 const [reservations, setReservations] = useState([]);
+const [showSearchResults, setShowSearchResults] = useState(false);
 const [queueStatus, setQueueStatus] = useState({
   waiting: 0,
   avgWaitTime: 0
@@ -1395,6 +1399,8 @@ useEffect(() => {
   }
 };
 
+
+
   // Fetch attendance logs
   const fetchAttendanceLogs = async () => {
     const q = query(
@@ -1550,6 +1556,44 @@ const handleAssignShift = async () => {
   }
 };
 
+const searchDialogCustomers = async (searchTerm) => {
+  if (!searchTerm || searchTerm.length < 2) {
+    setDialogCustomerResults([]);
+    return;
+  }
+
+  try {
+    const term = searchTerm.toLowerCase();
+    const customersRef = collection(db, 'loyaltyCustomers');
+    
+    // Get all customers first (since Firestore doesn't support OR queries well)
+    const allCustomersQuery = query(customersRef, limit(100));
+    const allCustomersSnapshot = await getDocs(allCustomersQuery);
+    
+    // Filter in-memory to handle cases where fields might be missing
+    const filteredResults = allCustomersSnapshot.docs
+      .map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        points: doc.data().points || 0,
+        cardNumber: doc.data().cardNumber || 'N/A'
+      }))
+      .filter(customer => {
+        // Check if any field matches the search term
+        return (
+          (customer.name && customer.name.toLowerCase().includes(term)) ||
+          (customer.email && customer.email.toLowerCase().includes(term)) ||
+          (customer.cardNumber && customer.cardNumber.toLowerCase().includes(term)) ||
+          (customer.phone && customer.phone.toLowerCase().includes(term))
+        );
+      });
+
+    setDialogCustomerResults(filteredResults);
+  } catch (error) {
+    console.error('Error searching customers:', error);
+    showSnackbar('Error searching customers', 'error');
+  }
+};
 const fetchAllStaff = async () => {
   const q = query(collection(db, 'users'), where('role', 'in', ['staff', 'barista', 'cashier', 'shift-lead']));
   const querySnapshot = await getDocs(q);
@@ -2085,68 +2129,91 @@ useEffect(() => {
 
 
 useEffect(() => {
-  if (!customerSearch || customerSearch.length < 2) {
+  if (!customerSearch || customerSearch.length < 1) { // Changed to 1 character minimum
     setCustomerResults([]);
+    setShowSearchResults(false);
     return;
   }
 
   const searchCustomers = async () => {
-  try {
-    const searchTerm = customerSearch.toLowerCase();
-    const customersRef = collection(db, 'loyaltyCustomers');
-    
-    // Create a query that searches name, email, and cardNumber
-    const queries = [
-      query(
-        customersRef,
-        where('name', '>=', searchTerm),
-        where('name', '<=', searchTerm + '\uf8ff'),
-        limit(10)
-      ),
-      query(
-        customersRef,
-        where('email', '>=', searchTerm),
-        where('email', '<=', searchTerm + '\uf8ff'),
-        limit(10)
-      ),
-      query(
-        customersRef,
-        where('cardNumber', '>=', searchTerm),
-        where('cardNumber', '<=', searchTerm + '\uf8ff'),
-        limit(10)
-      )
-    ];
+    try {
+      const searchTerm = customerSearch.toLowerCase();
+      const customersRef = collection(db, 'loyaltyCustomers');
+      
+      // Create queries for different fields
+      const queries = [
+        query(
+          customersRef,
+          where('name', '>=', searchTerm),
+          where('name', '<=', searchTerm + '\uf8ff'),
+          limit(10)
+        ),
+        query(
+          customersRef,
+          where('email', '>=', searchTerm),
+          where('email', '<=', searchTerm + '\uf8ff'),
+          limit(10)
+        ),
+        query(
+          customersRef,
+          where('cardNumber', '>=', searchTerm),
+          where('cardNumber', '<=', searchTerm + '\uf8ff'),
+          limit(10)
+        ),
+        query(
+          customersRef,
+          where('phone', '>=', searchTerm),
+          where('phone', '<=', searchTerm + '\uf8ff'),
+          limit(10)
+        )
+      ];
 
-    const querySnapshots = await Promise.all(queries.map(q => getDocs(q)));
-    
-    // Combine results and remove duplicates
-    const allResults = [];
-    const seenIds = new Set();
-    
-    querySnapshots.forEach(snapshot => {
-      snapshot.docs.forEach(doc => {
-        if (!seenIds.has(doc.id)) {
-          seenIds.add(doc.id);
-          allResults.push({
-            id: doc.id,
-            ...doc.data(),
-            points: doc.data().points || 0,
-            cardNumber: doc.data().cardNumber || 'N/A'
-          });
-        }
+      const querySnapshots = await Promise.all(queries.map(q => getDocs(q)));
+      
+      // Combine results and remove duplicates
+      const allResults = [];
+      const seenIds = new Set();
+      
+      querySnapshots.forEach(snapshot => {
+        snapshot.docs.forEach(doc => {
+          if (!seenIds.has(doc.id)) {
+            seenIds.add(doc.id);
+            allResults.push({
+              id: doc.id,
+              ...doc.data(),
+              points: doc.data().points || 0,
+              cardNumber: doc.data().cardNumber || 'N/A'
+            });
+          }
+        });
       });
-    });
 
-    setCustomerResults(allResults);
-  } catch (error) {
-    console.error('Error searching customers:', error);
-    showSnackbar('Error searching customers', 'error');
+      setCustomerResults(allResults);
+      setShowSearchResults(allResults.length > 0); // Show dropdown if there are results
+    } catch (error) {
+      console.error('Error searching customers:', error);
+      showSnackbar('Error searching customers', 'error');
+      setShowSearchResults(false);
+    }
+  };
+
+  const timer = setTimeout(searchCustomers, 200); // Reduced debounce time
+  return () => clearTimeout(timer);
+}, [customerSearch]);
+
+// Add this handler to close dropdown when clicking outside
+const handleClickOutside = (event) => {
+  if (event.target.closest('.search-container') === null) {
+    setShowSearchResults(false);
   }
 };
 
-  const timer = setTimeout(searchCustomers, 300);
-  return () => clearTimeout(timer);
-}, [customerSearch]);
+useEffect(() => {
+  document.addEventListener('mousedown', handleClickOutside);
+  return () => {
+    document.removeEventListener('mousedown', handleClickOutside);
+  };
+}, []);
 
 const getWeatherBasedSuggestions = () => {
   const now = new Date();
@@ -3177,167 +3244,353 @@ const validateShiftStatus = (shift) => {
     </Grid>
 
     {/* Loyalty Points Card - Coffee Themed */}
-    <Grid item xs={12} md={4}>
-      <Card sx={{ 
-        height: '100%',
-        background: 'linear-gradient(to bottom, #ffffff 0%, #fff9f0 100%)',
-        border: '1px solid #e0d6c2',
-        borderRadius: '16px',
-        boxShadow: '0 4px 20px 0 rgba(0,0,0,0.08)',
-        overflow: 'hidden',
-        '&:hover': {
-          boxShadow: '0 6px 24px 0 rgba(0,0,0,0.12)'
+<Grid item xs={12} md={4}>
+  <Card sx={{ 
+    height: '100%',
+    background: 'linear-gradient(to bottom, #ffffff 0%, #fff9f0 100%)',
+    border: '1px solid #e0d6c2',
+    borderRadius: '16px',
+    boxShadow: '0 4px 20px 0 rgba(0,0,0,0.08)',
+    overflow: 'hidden',
+    '&:hover': {
+      boxShadow: '0 6px 24px 0 rgba(0,0,0,0.12)'
+    }
+  }}>
+    <CardHeader
+      avatar={
+        <Avatar sx={{ 
+          bgcolor: 'transparent',
+          color: '#6f4e37',
+          border: '2px solid #6f4e37'
+        }}>
+          <Loyalty />
+        </Avatar>
+      }
+      title="Loyalty Points Tracker"
+      titleTypographyProps={{ 
+        variant: 'h6', 
+        fontWeight: 'bold',
+        color: '#6f4e37',
+        fontFamily: '"Playfair Display", serif'
+      }}
+      action={
+        <IconButton onClick={() => setShowCustomerSearchDialog(true)}>
+          <People sx={{ color: '#6f4e37' }} />
+        </IconButton>
+      }
+      sx={{
+        borderBottom: '1px solid #e0d6c2',
+        background: 'linear-gradient(to right, #ffffff 0%, #f8f3e9 100%)'
+      }}
+    />
+    <CardContent>
+  <Box className="search-container" position="relative">
+    <Autocomplete
+      freeSolo
+      options={customerResults}
+      getOptionLabel={(option) => 
+        typeof option === 'string' ? option : 
+        `${option.name || option.email} (Card: ${option.cardNumber || 'N/A'}, ${option.points || 0} pts)`
+      }
+      inputValue={customerSearch}
+      onInputChange={(event, newValue) => {
+        setCustomerSearch(newValue);
+        if (newValue === '') {
+          setCustomerResults([]);
+          setSelectedCustomer(null);
+          setShowSearchResults(false);
         }
-      }}>
-        <CardHeader
-          avatar={
-            <Avatar sx={{ 
-              bgcolor: 'transparent',
-              color: '#6f4e37',
-              border: '2px solid #6f4e37'
-            }}>
-              <Loyalty />
-            </Avatar>
-          }
-          title="Loyalty Points Tracker"
-          titleTypographyProps={{ 
-            variant: 'h6', 
-            fontWeight: 'bold',
-            color: '#6f4e37',
-            fontFamily: '"Playfair Display", serif'
+      }}
+      onChange={(event, newValue) => {
+        if (newValue === null || typeof newValue === 'string') {
+          setSelectedCustomer(null);
+          return;
+        }
+        if (typeof newValue === 'object') {
+          setSelectedCustomer({
+            ...newValue,
+            points: newValue.points || 0
+          });
+          setShowLoyaltyDialog(true);
+          fetchAvailableRewards();
+          setShowSearchResults(false);
+        }
+      }}
+      renderInput={(params) => (
+        <TextField 
+          {...params} 
+          label="Search customer by name, email, or card number" 
+          variant="outlined" 
+          size="small"
+          fullWidth
+          InputProps={{
+            ...params.InputProps,
+            startAdornment: (
+              <InputAdornment position="start">
+                <Search sx={{ color: '#9c8c72' }} />
+              </InputAdornment>
+            ),
           }}
           sx={{
-            borderBottom: '1px solid #e0d6c2',
-            background: 'linear-gradient(to right, #ffffff 0%, #f8f3e9 100%)'
+            '& .MuiOutlinedInput-root': {
+              borderRadius: '12px',
+              backgroundColor: '#fff',
+              '& fieldset': {
+                borderColor: '#e0d6c2',
+              },
+              '&:hover fieldset': {
+                borderColor: '#d4a762',
+              },
+              '&.Mui-focused fieldset': {
+                borderColor: '#6f4e37',
+              },
+            },
+            '& .MuiInputLabel-root': {
+              color: '#9c8c72',
+            },
+            '& .MuiInputLabel-root.Mui-focused': {
+              color: '#6f4e37',
+            },
           }}
         />
-        <CardContent>
-          <Autocomplete
-            freeSolo
-            options={customerResults}
-            getOptionLabel={(option) => 
-              typeof option === 'string' ? option : 
-              `${option.name || option.email} (Card: ${option.cardNumber || 'N/A'}, ${option.points || 0} pts)`
-            }
-            inputValue={customerSearch}
-            onInputChange={(event, newValue) => {
-              setCustomerSearch(newValue);
-              if (newValue === '') {
-                setCustomerResults([]);
-                setSelectedCustomer(null);
-              }
-            }}
-            onChange={(event, newValue) => {
-              if (newValue === null || typeof newValue === 'string') {
-                setSelectedCustomer(null);
-                return;
-              }
-              if (typeof newValue === 'object') {
+      )}
+      noOptionsText={customerSearch.length > 0 ? "No customers found" : "Start typing to search"}
+      open={showSearchResults}
+      onOpen={() => setShowSearchResults(true)}
+      onClose={() => setShowSearchResults(false)}
+      sx={{
+        '& .MuiAutocomplete-popper': {
+          borderRadius: '12px',
+        }
+      }}
+    />
+    
+    {/* Custom dropdown for better control */}
+    {showSearchResults && customerResults.length > 0 && (
+      <Paper 
+        elevation={3} 
+        sx={{
+          position: 'absolute',
+          width: '100%',
+          maxHeight: 300,
+          overflow: 'auto',
+          zIndex: 1300,
+          mt: 0.5,
+          borderRadius: '12px',
+          border: '1px solid #e0d6c2',
+          backgroundColor: '#fff9f0'
+        }}
+      >
+        <List>
+          {customerResults.map((customer) => (
+            <ListItem 
+              key={customer.id}
+              button
+              onClick={() => {
                 setSelectedCustomer({
-                  ...newValue,
-                  points: newValue.points || 0
+                  ...customer,
+                  points: customer.points || 0
                 });
                 setShowLoyaltyDialog(true);
                 fetchAvailableRewards();
-              }
-            }}
-            renderInput={(params) => (
-              <TextField 
-                {...params} 
-                label="Search customer by name, email, or card number" 
-                variant="outlined" 
-                size="small"
-                fullWidth
-                InputProps={{
-                  ...params.InputProps,
-                  startAdornment: (
-                    <InputAdornment position="start">
-                      <Search sx={{ color: '#9c8c72' }} />
-                    </InputAdornment>
-                  ),
+                setShowSearchResults(false);
+              }}
+              sx={{
+                '&:hover': {
+                  backgroundColor: 'rgba(111, 78, 55, 0.08)'
+                },
+                borderBottom: '1px solid #e0d6c2'
+              }}
+            >
+              <ListItemAvatar>
+                <Avatar sx={{ bgcolor: 'rgba(111, 78, 55, 0.1)', color: '#6f4e37' }}>
+                  {customer.name ? customer.name.charAt(0).toUpperCase() : customer.email.charAt(0).toUpperCase()}
+                </Avatar>
+              </ListItemAvatar>
+              <ListItemText
+                primary={customer.name || customer.email}
+                secondary={`Card: ${customer.cardNumber || 'N/A'} • Points: ${customer.points || 0}`}
+                primaryTypographyProps={{ 
+                  fontWeight: 'medium',
+                  color: '#6f4e37'
                 }}
-                sx={{
-                  '& .MuiOutlinedInput-root': {
-                    borderRadius: '12px',
-                    backgroundColor: '#fff',
-                    '& fieldset': {
-                      borderColor: '#e0d6c2',
-                    },
-                    '&:hover fieldset': {
-                      borderColor: '#d4a762',
-                    },
-                    '&.Mui-focused fieldset': {
-                      borderColor: '#6f4e37',
-                    },
-                  },
-                  '& .MuiInputLabel-root': {
-                    color: '#9c8c72',
-                  },
-                  '& .MuiInputLabel-root.Mui-focused': {
-                    color: '#6f4e37',
-                  },
+                secondaryTypographyProps={{
+                  color: '#9c8c72'
                 }}
               />
-            )}
-            noOptionsText={customerSearch.length > 0 ? "No customers found" : "Start typing to search"}
+            </ListItem>
+          ))}
+        </List>
+      </Paper>
+    )}
+  </Box>
+
+  {selectedCustomer && (
+    <Box sx={{ 
+      mt: 2, 
+      p: 2, 
+      backgroundColor: 'rgba(255,243,224,0.7)', 
+      borderRadius: '12px',
+      border: '1px dashed #d4a762'
+    }}>
+      <Box display="flex" justifyContent="space-between" alignItems="center">
+        <Typography variant="subtitle1" fontWeight="bold" color="#6f4e37">
+          {selectedCustomer.name || selectedCustomer.email}
+        </Typography>
+        <Chip 
+          label={`${selectedCustomer.points || 0} pts`} 
+          sx={{ 
+            backgroundColor: '#d4a762',
+            color: '#fff',
+            fontWeight: 'bold',
+            fontSize: '0.75rem'
+          }}
+          size="small"
+        />
+      </Box>
+      <Button 
+        variant="outlined" 
+        size="small" 
+        startIcon={<CardGiftcard sx={{ color: '#6f4e37' }} />}
+        onClick={() => {
+          setShowLoyaltyDialog(true);
+          fetchAvailableRewards();
+        }}
+        sx={{ 
+          mt: 1,
+          border: '2px solid #6f4e37',
+          color: '#6f4e37',
+          borderRadius: '12px',
+          textTransform: 'none',
+          fontWeight: 'bold',
+          '&:hover': {
+            backgroundColor: 'rgba(111, 78, 55, 0.08)',
+            border: '2px solid #5a3d2a'
+          }
+        }}
+        fullWidth
+      >
+        Redeem Rewards
+      </Button>
+    </Box>
+  )}
+</CardContent>
+  </Card>
+    </Grid>
+
+{/* Customer Search Dialog */}
+<Dialog 
+  open={showCustomerSearchDialog} 
+  onClose={() => setShowCustomerSearchDialog(false)}
+  maxWidth="md"
+  fullWidth
+>
+  <DialogTitle sx={{
+    backgroundColor: '#6f4e37',
+    color: '#fff',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center'
+  }}>
+    <Box display="flex" alignItems="center">
+      <People sx={{ mr: 1 }} />
+      <Typography variant="h6">Registered Customers</Typography>
+    </Box>
+    <IconButton 
+      edge="end" 
+      color="inherit" 
+      onClick={() => setShowCustomerSearchDialog(false)}
+    >
+      <Close />
+    </IconButton>
+  </DialogTitle>
+  <DialogContent sx={{ pt: 3 }}>
+    <TextField
+      fullWidth
+      variant="outlined"
+      label="Search customers by name, email, or card number"
+      value={dialogCustomerSearch}
+      onChange={(e) => {
+        setDialogCustomerSearch(e.target.value);
+        searchDialogCustomers(e.target.value);
+      }}
+      InputProps={{
+        startAdornment: (
+          <InputAdornment position="start">
+            <Search />
+          </InputAdornment>
+        ),
+      }}
+      sx={{ mb: 2 }}
+    />
+    
+    <List sx={{ maxHeight: '400px', overflow: 'auto' }}>
+      {dialogCustomerResults.length > 0 ? (
+        dialogCustomerResults.map((customer) => (
+          <ListItem 
+            key={customer.id} 
+            button
+            onClick={() => {
+              setSelectedCustomer({
+                ...customer,
+                points: customer.points || 0
+              });
+              setShowCustomerSearchDialog(false);
+              setShowLoyaltyDialog(true);
+              fetchAvailableRewards();
+            }}
             sx={{
-              '& .MuiAutocomplete-popper': {
-                borderRadius: '12px',
+              borderBottom: '1px solid #eee',
+              '&:hover': {
+                backgroundColor: 'rgba(111, 78, 55, 0.08)'
               }
             }}
-          />
-          {selectedCustomer && (
-            <Box sx={{ 
-              mt: 2, 
-              p: 2, 
-              backgroundColor: 'rgba(255,243,224,0.7)', 
-              borderRadius: '12px',
-              border: '1px dashed #d4a762'
-            }}>
-              <Box display="flex" justifyContent="space-between" alignItems="center">
-                <Typography variant="subtitle1" fontWeight="bold" color="#6f4e37">
-                  {selectedCustomer.name || selectedCustomer.email}
-                </Typography>
-                <Chip 
-                  label={`${selectedCustomer.points || 0} pts`} 
-                  sx={{ 
-                    backgroundColor: '#d4a762',
-                    color: '#fff',
-                    fontWeight: 'bold',
-                    fontSize: '0.75rem'
-                  }}
-                  size="small"
-                />
-              </Box>
-              <Button 
-                variant="outlined" 
-                size="small" 
-                startIcon={<CardGiftcard sx={{ color: '#6f4e37' }} />}
-                onClick={() => {
-                  setShowLoyaltyDialog(true);
-                  fetchAvailableRewards();
-                }}
-                sx={{ 
-                  mt: 1,
-                  border: '2px solid #6f4e37',
-                  color: '#6f4e37',
-                  borderRadius: '12px',
-                  textTransform: 'none',
-                  fontWeight: 'bold',
-                  '&:hover': {
-                    backgroundColor: 'rgba(111, 78, 55, 0.08)',
-                    border: '2px solid #5a3d2a'
-                  }
-                }}
-                fullWidth
-              >
-                Redeem Rewards
-              </Button>
-            </Box>
-          )}
-        </CardContent>
-      </Card>
-    </Grid>
+          >
+            <ListItemAvatar>
+              <Avatar sx={{ bgcolor: 'rgba(111, 78, 55, 0.1)', color: '#6f4e37' }}>
+                {customer.name ? customer.name.charAt(0).toUpperCase() : customer.email.charAt(0).toUpperCase()}
+              </Avatar>
+            </ListItemAvatar>
+            <ListItemText
+              primary={customer.name || customer.email}
+              secondary={`Card: ${customer.cardNumber || 'N/A'} • Points: ${customer.points || 0}`}
+              primaryTypographyProps={{ fontWeight: 'medium' }}
+            />
+            <ListItemSecondaryAction>
+              <IconButton edge="end" onClick={() => {
+                setSelectedCustomer({
+                  ...customer,
+                  points: customer.points || 0
+                });
+                setShowCustomerSearchDialog(false);
+                setShowLoyaltyDialog(true);
+                fetchAvailableRewards();
+              }}>
+                <ArrowForward sx={{ color: '#6f4e37' }} />
+              </IconButton>
+            </ListItemSecondaryAction>
+          </ListItem>
+        ))
+      ) : (
+        <Box sx={{ 
+          display: 'flex', 
+          flexDirection: 'column', 
+          alignItems: 'center', 
+          justifyContent: 'center', 
+          p: 4,
+          textAlign: 'center'
+        }}>
+          <SearchOff sx={{ fontSize: 48, color: '#9c8c72', mb: 2 }} />
+          <Typography variant="body1" color="textSecondary">
+            {dialogCustomerSearch.length > 0 
+              ? "No customers found matching your search"
+              : "Start typing to search for registered customers"}
+          </Typography>
+        </Box>
+      )}
+    </List>
+  </DialogContent>
+</Dialog>
 
     {/* Active Orders Card - Coffee Themed */}
     <Grid item xs={12} md={6}>
