@@ -203,8 +203,27 @@ const Inventory = () => {
       }}>
         Inventory Management
       </Typography>
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
-        <Tabs value={activeTab} onChange={handleTabChange} textColor="primary" indicatorColor="primary">
+      {/* Make Tabs horizontally scrollable on mobile */}
+      <Box
+        sx={{
+          borderBottom: 1,
+          borderColor: 'divider',
+          mb: 3,
+          overflowX: 'auto',
+          width: '100%',
+          // Hide scrollbar but allow scroll
+          '&::-webkit-scrollbar': { display: 'none' }
+        }}
+      >
+        <Tabs
+          value={activeTab}
+          onChange={handleTabChange}
+          textColor="primary"
+          indicatorColor="primary"
+          variant="scrollable"
+          scrollButtons="auto"
+          allowScrollButtonsMobile
+        >
           <Tab label="Products" />
           <Tab label="Variants" />
           <Tab label="Varieties" />
