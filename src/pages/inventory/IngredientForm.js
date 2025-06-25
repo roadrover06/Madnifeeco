@@ -31,6 +31,8 @@ import { Add, Delete, Edit } from '@mui/icons-material';
 
 const UNITS = ['grams', 'kilograms', 'ml', 'liters', 'pieces', 'packs', 'sachets'];
 
+const DEFAULT_UNIT = UNITS[0];
+
 const IngredientForm = () => {
   const [ingredients, setIngredients] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -51,10 +53,17 @@ const IngredientForm = () => {
       try {
         const q = query(collection(db, 'ingredients'));
         const querySnapshot = await getDocs(q);
-        const ingredientsData = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
+        const ingredientsData = querySnapshot.docs.map(doc => {
+          const data = doc.data();
+          // Ensure unit is always set and valid
+          let unit = data.unit;
+          if (!unit || !UNITS.includes(unit)) unit = DEFAULT_UNIT;
+          return {
+            id: doc.id,
+            ...data,
+            unit
+          };
+        });
         setIngredients(ingredientsData);
       } catch (error) {
         console.error('Error fetching ingredients:', error);
@@ -74,15 +83,20 @@ const IngredientForm = () => {
   };
 
   const handleAddIngredient = async () => {
-    if (!newIngredient.name) return;
+    // Prevent adding if name or unit is missing/invalid
+    if (!newIngredient.name || !newIngredient.unit || !UNITS.includes(newIngredient.unit)) {
+      setSnackbar({ open: true, message: 'Please enter a name and select a valid unit.', severity: 'error' });
+      return;
+    }
     try {
       setLoading(true);
       const docRef = await addDoc(collection(db, 'ingredients'), {
         ...newIngredient,
+        unit: newIngredient.unit || DEFAULT_UNIT,
         createdAt: new Date()
       });
-      setIngredients([...ingredients, { id: docRef.id, ...newIngredient }]);
-      setNewIngredient({ name: '', stock: 0, unit: 'grams' });
+      setIngredients([...ingredients, { id: docRef.id, ...newIngredient, unit: newIngredient.unit || DEFAULT_UNIT }]);
+      setNewIngredient({ name: '', stock: 0, unit: DEFAULT_UNIT });
       setSnackbar({ open: true, message: 'Ingredient added!', severity: 'success' });
     } catch (error) {
       setSnackbar({ open: true, message: 'Failed to add ingredient.', severity: 'error' });
@@ -107,7 +121,11 @@ const IngredientForm = () => {
 
   const handleEditClick = (ingredient) => {
     setIngredientToEdit(ingredient);
-    setEditIngredient({ name: ingredient.name, stock: ingredient.stock, unit: ingredient.unit });
+    setEditIngredient({
+      name: ingredient.name,
+      stock: ingredient.stock,
+      unit: UNITS.includes(ingredient.unit) ? ingredient.unit : DEFAULT_UNIT
+    });
     setEditDialogOpen(true);
   };
 
@@ -121,6 +139,11 @@ const IngredientForm = () => {
 
   const handleEditSave = async () => {
     if (!ingredientToEdit) return;
+    // Prevent saving if name or unit is missing/invalid
+    if (!editIngredient.name || !editIngredient.unit || !UNITS.includes(editIngredient.unit)) {
+      setSnackbar({ open: true, message: 'Please enter a name and select a valid unit.', severity: 'error' });
+      return;
+    }
     setEditDialogOpen(false);
     try {
       setLoading(true);
@@ -264,7 +287,7 @@ const IngredientForm = () => {
                     {ingredient.name}
                   </TableCell>
                   <TableCell>{ingredient.stock}</TableCell>
-                  <TableCell>{ingredient.unit}</TableCell>
+                  <TableCell>{ingredient.unit || DEFAULT_UNIT}</TableCell>
                   <TableCell>
                     <IconButton color="primary" onClick={() => handleEditClick(ingredient)} disabled={loading}>
                       <Edit />

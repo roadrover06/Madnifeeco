@@ -6,6 +6,9 @@ import { auth, db } from '../firebase';
 import { QrCode } from '@mui/icons-material';
 import QRCode from 'react-qr-code';
 import { RateReview } from '@mui/icons-material';
+import FormControl from '@mui/material/FormControl';
+import InputLabel from '@mui/material/InputLabel';
+
 
 import { jsPDF } from 'jspdf';
 import * as ExcelJS from 'exceljs';
@@ -136,7 +139,12 @@ const [feedbackComment, setFeedbackComment] = useState('');
   const [ingredient, setIngredient] = useState('');
   const [ingredientLevel, setIngredientLevel] = useState('low');
   const [supplyRequest, setSupplyRequest] = useState('');
-  const [currentShift, setCurrentShift] = useState(null);
+  const [currentShifts, setCurrentShifts] = useState({
+  firstShift: null,
+  secondShift: null,
+  thirdShift: null
+});
+const [todaysShifts, setTodaysShifts] = useState([]);
   const [snackbar, setSnackbar] = useState({
     open: false,
     message: '',
@@ -173,6 +181,7 @@ const [newShift, setNewShift] = useState({
   endTime: '17:00',
   role: 'barista'
 });
+const [shiftFilter, setShiftFilter] = useState('all');
 const [showAddRewardDialog, setShowAddRewardDialog] = useState(false);
 const [newReward, setNewReward] = useState({
   name: '',
@@ -181,7 +190,7 @@ const [newReward, setNewReward] = useState({
   active: true
 });
 
-const fetchStaffSalesData = async () => {
+const fetchStaffSalesData = async (shiftType = null) => {
   try {
     const startDate = new Date(salesReportDateRange.start);
     startDate.setHours(0, 0, 0, 0);
@@ -189,12 +198,46 @@ const fetchStaffSalesData = async () => {
     const endDate = new Date(salesReportDateRange.end);
     endDate.setHours(23, 59, 59, 999);
 
-    const q = query(
-      collection(db, 'orders'),
+    let queryConstraints = [
       where('createdAt', '>=', startDate),
       where('createdAt', '<=', endDate),
-      where('completedBy', '==', user.uid), // Changed from staffId to completedBy
+      where('completedBy', '==', user.uid),
       orderBy('createdAt', 'desc')
+    ];
+
+    // If filtering by shift, add time constraints
+    if (shiftType) {
+      let startHour, endHour;
+      
+      if (shiftType === 'firstShift') {
+        startHour = 10; // 10AM
+        endHour = 18;   // 6PM
+      } else if (shiftType === 'secondShift') {
+        startHour = 18; // 6PM
+        endHour = 22;   // 10PM
+      } else if (shiftType === 'thirdShift') {
+        startHour = 22; // 10PM
+        endHour = 2;    // 2AM (next day)
+      }
+
+      // Create time constraints
+      const shiftStart = new Date(startDate);
+      shiftStart.setHours(startHour, 0, 0, 0);
+      
+      const shiftEnd = new Date(startDate);
+      if (endHour < startHour) {
+        // Handle overnight shift (10PM-2AM)
+        shiftEnd.setDate(shiftEnd.getDate() + 1);
+      }
+      shiftEnd.setHours(endHour, 0, 0, 0);
+
+      queryConstraints.push(where('createdAt', '>=', shiftStart));
+      queryConstraints.push(where('createdAt', '<', shiftEnd));
+    }
+
+    const q = query(
+      collection(db, 'orders'),
+      ...queryConstraints
     );
 
     const querySnapshot = await getDocs(q);
@@ -1889,43 +1932,95 @@ useEffect(() => {
       }
     };
 
-    const fetchCurrentShift = async () => {
+    const fetchCurrentShifts = async () => {
   const today = format(new Date(), 'yyyy-MM-dd');
   const shiftsRef = collection(db, 'shifts');
+  
+  // Query all shifts for today for this user
   const q = query(
     shiftsRef,
     where('userId', '==', user.uid),
     where('date', '==', today),
-    orderBy('clockIn', 'desc'),
-    limit(1)
+    orderBy('scheduledStart', 'asc')
   );
   
   const querySnapshot = await getDocs(q);
-  if (!querySnapshot.empty) {
-    const shiftData = querySnapshot.docs[0].data();
-    const clockIn = shiftData.clockIn?.toDate();
-    const clockOut = shiftData.clockOut?.toDate();
-    
-    // Determine status based on clock in/out times
-    let status;
-    if (clockIn && !clockOut) {
-      status = 'in-progress';
-    } else if (clockIn && clockOut) {
-      status = 'completed';
-    } else {
-      status = 'scheduled';
+  const shiftsData = querySnapshot.docs.map(doc => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      ...data,
+      clockIn: data.clockIn?.toDate(),
+      clockOut: data.clockOut?.toDate(),
+      status: data.status || 'scheduled'
+    };
+  });
+
+  setTodaysShifts(shiftsData);
+  
+  // Determine current shifts based on time
+  const now = new Date();
+  const currentHour = now.getHours();
+  
+  // Initialize shift objects
+  const shiftObjects = {
+    firstShift: null,
+    secondShift: null,
+    thirdShift: null
+  };
+
+  // Find existing shifts in database
+  shiftsData.forEach(shift => {
+    if (shift.scheduledStart === '10:00' && shift.scheduledEnd === '18:00') {
+      shiftObjects.firstShift = shift;
+    } else if (shift.scheduledStart === '18:00' && shift.scheduledEnd === '22:00') {
+      shiftObjects.secondShift = shift;
+    } else if (shift.scheduledStart === '22:00' && shift.scheduledEnd === '02:00') {
+      shiftObjects.thirdShift = shift;
     }
-    
-    setCurrentShift({ 
-      id: querySnapshot.docs[0].id, 
-      ...shiftData,
-      clockIn,
-      clockOut,
-      status // Use the determined status
-    });
-  } else {
-    setCurrentShift(null);
+  });
+
+  // Create default shift objects if they don't exist
+  if (!shiftObjects.firstShift) {
+    shiftObjects.firstShift = {
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.displayName || user.email.split('@')[0],
+      date: today,
+      scheduledStart: '10:00',
+      scheduledEnd: '18:00',
+      role: userData?.role || 'staff',
+      status: 'scheduled'
+    };
   }
+
+  if (!shiftObjects.secondShift) {
+    shiftObjects.secondShift = {
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.displayName || user.email.split('@')[0],
+      date: today,
+      scheduledStart: '18:00',
+      scheduledEnd: '22:00',
+      role: userData?.role || 'staff',
+      status: 'scheduled'
+    };
+  }
+
+  if (!shiftObjects.thirdShift) {
+    shiftObjects.thirdShift = {
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.displayName || user.email.split('@')[0],
+      date: today,
+      scheduledStart: '22:00',
+      scheduledEnd: '02:00',
+      role: userData?.role || 'staff',
+      status: 'scheduled'
+    };
+  }
+
+  setCurrentShifts(shiftObjects);
 };
 
     fetchUserData();
@@ -1934,7 +2029,7 @@ useEffect(() => {
     fetchStaffPerformance();
     fetchRecentActivity();
     fetchCurrentShiftNote();
-    fetchCurrentShift();
+    fetchCurrentShifts();
 
     // Set up real-time listener for announcements
     const announcementsQuery = query(
@@ -1997,43 +2092,95 @@ useEffect(() => {
   }
 };
 
-  const fetchCurrentShift = async () => {
+ const fetchCurrentShifts = async () => {
   const today = format(new Date(), 'yyyy-MM-dd');
   const shiftsRef = collection(db, 'shifts');
+  
+  // Query all shifts for today for this user
   const q = query(
     shiftsRef,
     where('userId', '==', user.uid),
     where('date', '==', today),
-    orderBy('clockIn', 'desc'),
-    limit(1)
+    orderBy('scheduledStart', 'asc')
   );
   
   const querySnapshot = await getDocs(q);
-  if (!querySnapshot.empty) {
-    const shiftData = querySnapshot.docs[0].data();
-    const clockIn = shiftData.clockIn?.toDate();
-    const clockOut = shiftData.clockOut?.toDate();
-    
-    // Determine status based on clock in/out times
-    let status;
-    if (clockIn && !clockOut) {
-      status = 'in-progress';
-    } else if (clockIn && clockOut) {
-      status = 'completed';
-    } else {
-      status = 'scheduled';
+  const shiftsData = querySnapshot.docs.map(doc => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      ...data,
+      clockIn: data.clockIn?.toDate(),
+      clockOut: data.clockOut?.toDate(),
+      status: data.status || 'scheduled'
+    };
+  });
+
+  setTodaysShifts(shiftsData);
+  
+  // Determine current shifts based on time
+  const now = new Date();
+  const currentHour = now.getHours();
+  
+  // Initialize shift objects
+  const shiftObjects = {
+    firstShift: null,
+    secondShift: null,
+    thirdShift: null
+  };
+
+  // Find existing shifts in database
+  shiftsData.forEach(shift => {
+    if (shift.scheduledStart === '10:00' && shift.scheduledEnd === '18:00') {
+      shiftObjects.firstShift = shift;
+    } else if (shift.scheduledStart === '18:00' && shift.scheduledEnd === '22:00') {
+      shiftObjects.secondShift = shift;
+    } else if (shift.scheduledStart === '22:00' && shift.scheduledEnd === '02:00') {
+      shiftObjects.thirdShift = shift;
     }
-    
-    setCurrentShift({ 
-      id: querySnapshot.docs[0].id, 
-      ...shiftData,
-      clockIn,
-      clockOut,
-      status // Use the determined status
-    });
-  } else {
-    setCurrentShift(null);
+  });
+
+  // Create default shift objects if they don't exist
+  if (!shiftObjects.firstShift) {
+    shiftObjects.firstShift = {
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.displayName || user.email.split('@')[0],
+      date: today,
+      scheduledStart: '10:00',
+      scheduledEnd: '18:00',
+      role: userData?.role || 'staff',
+      status: 'scheduled'
+    };
   }
+
+  if (!shiftObjects.secondShift) {
+    shiftObjects.secondShift = {
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.displayName || user.email.split('@')[0],
+      date: today,
+      scheduledStart: '18:00',
+      scheduledEnd: '22:00',
+      role: userData?.role || 'staff',
+      status: 'scheduled'
+    };
+  }
+
+  if (!shiftObjects.thirdShift) {
+    shiftObjects.thirdShift = {
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.displayName || user.email.split('@')[0],
+      date: today,
+      scheduledStart: '22:00',
+      scheduledEnd: '02:00',
+      role: userData?.role || 'staff',
+      status: 'scheduled'
+    };
+  }
+
+  setCurrentShifts(shiftObjects);
 };
 
 
@@ -2509,70 +2656,57 @@ const getActivityIcon = (activityType) => {
   }
 };
 
-  const handleClockIn = async () => {
+  const handleClockIn = async (shiftType) => {
   try {
     const today = format(new Date(), 'yyyy-MM-dd');
     const now = new Date();
     const currentTime = format(now, 'HH:mm');
     
-    // First check if there's a scheduled shift for today
-    const shiftsRef = collection(db, 'shifts');
-    const q = query(
-      shiftsRef,
-      where('userId', '==', user.uid),
-      where('date', '==', today),
-      where('status', 'in', ['scheduled', 'in-progress']),
-      limit(1)
-    );
+    // Determine which shift we're clocking into
+    let shiftToUpdate = currentShifts[shiftType];
     
-    const querySnapshot = await getDocs(q);
-    
-    if (!querySnapshot.empty) {
-      const shiftDoc = querySnapshot.docs[0];
-      const shiftData = shiftDoc.data();
-      
-      // Check if current time is before scheduled start (early clock-in)
-      if (shiftData.scheduledStart && currentTime < shiftData.scheduledStart) {
-        showSnackbar(`You're clocking in early (scheduled at ${shiftData.scheduledStart})`, 'info');
-      }
-      
-      // Update existing scheduled shift with clock-in data
-      await updateDoc(doc(db, 'shifts', shiftDoc.id), {
+    if (!shiftToUpdate) {
+      showSnackbar('Shift not found', 'error');
+      return;
+    }
+
+    // Check if this shift already exists in database
+    let shiftRef;
+    if (shiftToUpdate.id) {
+      // Update existing shift
+      shiftRef = doc(db, 'shifts', shiftToUpdate.id);
+      await updateDoc(shiftRef, {
         clockIn: now,
         clockInTimestamp: serverTimestamp(),
         status: 'in-progress',
-        actualStart: currentTime // Store actual clock-in time
-      });
-      
-      setCurrentShift({ 
-        id: shiftDoc.id, 
-        ...shiftData,
-        clockIn: now,
-        status: 'in-progress'
+        actualStart: currentTime
       });
     } else {
-      // Create new shift record if no scheduled shift exists
-      const shiftData = {
-        userId: user.uid,
-        userEmail: user.email,
-        userName: user.displayName || user.email.split('@')[0],
-        date: today,
+      // Create new shift record
+      const newShiftData = {
+        ...shiftToUpdate,
         clockIn: now,
-        role: userData?.role || 'staff',
         clockInTimestamp: serverTimestamp(),
         status: 'in-progress',
         actualStart: currentTime
       };
       
-      const docRef = await addDoc(collection(db, 'shifts'), shiftData);
-      setCurrentShift({ 
-        id: docRef.id, 
-        ...shiftData,
-        clockIn: now
-      });
+      const docRef = await addDoc(collection(db, 'shifts'), newShiftData);
+      shiftRef = docRef;
+      shiftToUpdate.id = docRef.id;
     }
-    
-    showSnackbar('Clocked in successfully!', 'success');
+
+    // Update local state
+    setCurrentShifts(prev => ({
+      ...prev,
+      [shiftType]: {
+        ...shiftToUpdate,
+        clockIn: now,
+        status: 'in-progress'
+      }
+    }));
+
+    showSnackbar(`Clocked into ${shiftType.replace('Shift', '')} shift successfully!`, 'success');
   } catch (error) {
     console.error('Error clocking in:', error);
     showSnackbar('Failed to clock in', 'error');
@@ -2580,27 +2714,29 @@ const getActivityIcon = (activityType) => {
 };
 
 
-  const handleClockOut = async () => {
-  if (!currentShift) {
+  const handleClockOut = async (shiftType) => {
+  const shiftToUpdate = currentShifts[shiftType];
+  
+  if (!shiftToUpdate) {
     showSnackbar('No active shift found', 'error');
     return;
   }
   
   try {
-    const shiftRef = doc(db, 'shifts', currentShift.id);
+    const shiftRef = doc(db, 'shifts', shiftToUpdate.id);
     const now = new Date();
     const currentTime = format(now, 'HH:mm');
     
     // Validate clock-in exists
-    if (!currentShift.clockIn) {
+    if (!shiftToUpdate.clockIn) {
       showSnackbar('Cannot clock out - no clock-in recorded', 'error');
       return;
     }
     
     // Calculate duration in minutes
-    const clockInDate = currentShift.clockIn instanceof Date ? 
-      currentShift.clockIn : 
-      new Date(currentShift.clockIn);
+    const clockInDate = shiftToUpdate.clockIn instanceof Date ? 
+      shiftToUpdate.clockIn : 
+      new Date(shiftToUpdate.clockIn);
     const duration = Math.floor((now - clockInDate) / 60000);
     
     await updateDoc(shiftRef, {
@@ -2611,8 +2747,17 @@ const getActivityIcon = (activityType) => {
       actualEnd: currentTime
     });
     
-    setCurrentShift(null);
-    showSnackbar('Clocked out successfully!', 'success');
+    // Update local state
+    setCurrentShifts(prev => ({
+      ...prev,
+      [shiftType]: {
+        ...prev[shiftType],
+        clockOut: now,
+        status: 'completed'
+      }
+    }));
+
+    showSnackbar(`Clocked out of ${shiftType.replace('Shift', '')} shift successfully!`, 'success');
   } catch (error) {
     console.error('Error clocking out:', error);
     showSnackbar('Failed to clock out', 'error');
@@ -2892,11 +3037,46 @@ const validateShiftStatus = (shift) => {
             }}
           />
         </Grid>
+        <Grid item xs={12}>
+          <FormControl fullWidth>
+            <InputLabel sx={{
+              '&.Mui-focused': {
+                color: '#6f4e37',
+              },
+            }}>Shift Filter</InputLabel>
+            <Select
+              value={shiftFilter}
+              onChange={(e) => setShiftFilter(e.target.value)}
+              label="Shift Filter"
+              sx={{
+                borderRadius: '12px',
+                '& .MuiOutlinedInput-notchedOutline': {
+                  borderColor: '#e0d6c2',
+                },
+                '&:hover .MuiOutlinedInput-notchedOutline': {
+                  borderColor: '#d4a762',
+                },
+                '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
+                  borderColor: '#6f4e37',
+                },
+              }}
+            >
+              <MenuItem value="all">All Shifts</MenuItem>
+              <MenuItem value="firstShift">1st Shift (10AM-6PM)</MenuItem>
+              <MenuItem value="secondShift">2nd Shift (6PM-10PM)</MenuItem>
+              <MenuItem value="thirdShift">3rd Shift (10PM-2AM)</MenuItem>
+            </Select>
+          </FormControl>
+        </Grid>
         <Grid item xs={12} sm={6}>
           <Button
             variant="contained"
             fullWidth
-            onClick={generatePDFReport}
+            onClick={async () => {
+              const data = await fetchStaffSalesData(shiftFilter === 'all' ? null : shiftFilter);
+              setSalesData(data);
+              generatePDFReport(data);
+            }}
             startIcon={<PictureAsPdf />}
             sx={{
               py: 1.5,
@@ -2920,7 +3100,11 @@ const validateShiftStatus = (shift) => {
           <Button
             variant="contained"
             fullWidth
-            onClick={generateExcelReport}
+            onClick={async () => {
+              const data = await fetchStaffSalesData(shiftFilter === 'all' ? null : shiftFilter);
+              setSalesData(data);
+              generateExcelReport(data);
+            }}
             startIcon={<GridOn />}
             sx={{
               py: 1.5,
@@ -2940,6 +3124,70 @@ const validateShiftStatus = (shift) => {
             Download Excel
           </Button>
         </Grid>
+        {salesData && salesData.length > 0 && (
+          <Grid item xs={12}>
+            <Box sx={{ 
+              mt: 2,
+              p: 2,
+              border: '1px solid #e0d6c2',
+              borderRadius: '12px',
+              backgroundColor: '#fff'
+            }}>
+              <Typography variant="subtitle1" fontWeight="bold" color="#6f4e37" gutterBottom>
+                Sales Report Preview ({salesData.length} orders)
+              </Typography>
+              <Box sx={{ maxHeight: '300px', overflow: 'auto' }}>
+                <Table size="small">
+                  <TableHead>
+                    <TableRow sx={{ backgroundColor: '#f5f0e6' }}>
+                      <TableCell sx={{ fontWeight: 'bold', color: '#6f4e37' }}>Order ID</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold', color: '#6f4e37' }}>Date</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold', color: '#6f4e37' }}>Customer</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold', color: '#6f4e37' }} align="right">Amount</TableCell>
+                      <TableCell sx={{ fontWeight: 'bold', color: '#6f4e37' }} align="right">Status</TableCell>
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {salesData.map((order) => (
+                      <TableRow key={order.id} hover>
+                        <TableCell>{order.id.slice(0, 8)}</TableCell>
+                        <TableCell>{format(order.createdAt, 'MMM d, h:mm a')}</TableCell>
+                        <TableCell>{order.customerName || 'Walk-in'}</TableCell>
+                        <TableCell align="right" sx={{ color: '#6f4e37', fontWeight: 'medium' }}>
+                          {order.total?.toFixed(2) || '0.00'} PHP
+                        </TableCell>
+                        <TableCell align="right">
+                          <Chip 
+                            label={order.status || 'completed'}
+                            size="small"
+                            sx={{ 
+                              backgroundColor: order.status === 'completed' ? '#e8f5e9' : 
+                                              order.status === 'cancelled' ? '#ffebee' : '#e3f2fd',
+                              color: order.status === 'completed' ? '#2e7d32' : 
+                                     order.status === 'cancelled' ? '#c62828' : '#1565c0',
+                              fontWeight: 'bold'
+                            }}
+                          />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </Box>
+              <Box sx={{ mt: 2, display: 'flex', justifyContent: 'space-between' }}>
+                <Typography variant="body2" color="#6f4e37">
+                  <strong>Total Orders:</strong> {salesData.length}
+                </Typography>
+                <Typography variant="body2" color="#6f4e37">
+                  <strong>Total Sales:</strong> {salesData.reduce((sum, order) => sum + (order.total || 0), 0).toFixed(2)} PHP
+                </Typography>
+                <Typography variant="body2" color="#6f4e37">
+                  <strong>Avg. Order:</strong> {(salesData.reduce((sum, order) => sum + (order.total || 0), 0) / salesData.length).toFixed(2)} PHP
+                </Typography>
+              </Box>
+            </Box>
+          </Grid>
+        )}
       </Grid>
     </CardContent>
   </Card>
@@ -2969,109 +3217,147 @@ const validateShiftStatus = (shift) => {
               </Button>
             </Grid>
             <Grid item xs={12}>
-              {currentShift?.status === 'in-progress' ? (
-                <Button 
-                  variant="contained" 
-                  fullWidth 
-                  startIcon={<Logout />}
-                  onClick={handleClockOut}
-                  sx={{ 
-                    mb: 1,
-                    py: 1.5,
-                    fontWeight: 'bold',
-                    backgroundColor: '#e74c3c',
-                    color: '#fff',
-                    borderRadius: '12px',
-                    textTransform: 'none',
-                    fontSize: '0.9rem',
-                    boxShadow: '0 2px 8px rgba(231, 76, 60, 0.2)',
-                    '&:hover': { 
-                      backgroundColor: '#c0392b',
-                      boxShadow: '0 4px 12px rgba(231, 76, 60, 0.3)'
-                    }
-                  }}
-                >
-                  Clock Out
-                </Button>
-              ) : (
-                <Button 
-                  variant="contained" 
-                  fullWidth 
-                  startIcon={<Login />}
-                  onClick={handleClockIn}
-                  sx={{ 
-                    mb: 1,
-                    py: 1.5,
-                    fontWeight: 'bold',
-                    backgroundColor: '#2ecc71',
-                    color: '#fff',
-                    borderRadius: '12px',
-                    textTransform: 'none',
-                    fontSize: '0.9rem',
-                    boxShadow: '0 2px 8px rgba(46, 204, 113, 0.2)',
-                    '&:hover': { 
-                      backgroundColor: '#27ae60',
-                      boxShadow: '0 4px 12px rgba(46, 204, 113, 0.3)'
-                    }
-                  }}
-                  disabled={!!currentShift?.clockOut} 
-                >
-                  {currentShift ? 'Continue Shift' : 'Clock In'}
-                </Button>
-              )}
-              {currentShift && (
-                <Box sx={{ 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  mt: 1,
-                  p: 1.5,
-                  backgroundColor: 'rgba(111, 78, 55, 0.05)',
-                  borderRadius: '12px',
-                  border: '1px dashed #d4a762'
-                }}>
-                  <AccessTime sx={{ color: '#6f4e37', mr: 1 }} />
-                  <Typography variant="caption" color="#6f4e37" sx={{ fontWeight: 'medium' }}>
-                    {currentShift.clockIn ? 
-                      `Clocked in at: ${format(new Date(currentShift.clockIn), 'h:mm a')}` : 
-                      'Not clocked in yet'}
+              {/* First Shift (10AM-6PM) */}
+              <Box sx={{ mb: 2, p: 2, border: '1px solid #e0d6c2', borderRadius: '12px' }}>
+                <Typography variant="subtitle2" fontWeight="bold" color="#6f4e37">
+                  1st Shift (10AM-6PM)
+                </Typography>
+                <Typography variant="body2" color="#9c8c72">
+                  Status: {currentShifts.firstShift?.status || 'Not started'}
+                </Typography>
+                {currentShifts.firstShift?.clockIn && (
+                  <Typography variant="body2" color="#9c8c72">
+                    Clocked in: {format(currentShifts.firstShift.clockIn, 'h:mm a')}
                   </Typography>
-                  <Button 
-                    size="small" 
-                    onClick={fetchCurrentShift}
-                    sx={{ 
-                      ml: 'auto',
-                      color: '#6f4e37',
-                      textTransform: 'none',
-                      fontSize: '0.75rem'
-                    }}
-                  >
-                    Refresh Status
-                  </Button>
+                )}
+                {currentShifts.firstShift?.clockOut && (
+                  <Typography variant="body2" color="#9c8c72">
+                    Clocked out: {format(currentShifts.firstShift.clockOut, 'h:mm a')}
+                  </Typography>
+                )}
+                <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+                  {currentShifts.firstShift?.status !== 'completed' && (
+                    <Button 
+                      variant="contained"
+                      size="small"
+                      onClick={() => 
+                        currentShifts.firstShift?.status === 'in-progress' 
+                          ? handleClockOut('firstShift') 
+                          : handleClockIn('firstShift')
+                      }
+                      sx={{ 
+                        backgroundColor: currentShifts.firstShift?.status === 'in-progress' ? '#e74c3c' : '#2ecc71',
+                        color: '#fff'
+                      }}
+                    >
+                      {currentShifts.firstShift?.status === 'in-progress' ? 'Clock Out' : 'Clock In'}
+                    </Button>
+                  )}
                 </Box>
-              )}
+              </Box>
+
+              {/* Second Shift (6PM-10PM) */}
+              <Box sx={{ mb: 2, p: 2, border: '1px solid #e0d6c2', borderRadius: '12px' }}>
+                <Typography variant="subtitle2" fontWeight="bold" color="#6f4e37">
+                  2nd Shift (6PM-10PM)
+                </Typography>
+                <Typography variant="body2" color="#9c8c72">
+                  Status: {currentShifts.secondShift?.status || 'Not started'}
+                </Typography>
+                {currentShifts.secondShift?.clockIn && (
+                  <Typography variant="body2" color="#9c8c72">
+                    Clocked in: {format(currentShifts.secondShift.clockIn, 'h:mm a')}
+                  </Typography>
+                )}
+                {currentShifts.secondShift?.clockOut && (
+                  <Typography variant="body2" color="#9c8c72">
+                    Clocked out: {format(currentShifts.secondShift.clockOut, 'h:mm a')}
+                  </Typography>
+                )}
+                <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+                  {currentShifts.secondShift?.status !== 'completed' && (
+                    <Button 
+                      variant="contained"
+                      size="small"
+                      onClick={() => 
+                        currentShifts.secondShift?.status === 'in-progress' 
+                          ? handleClockOut('secondShift') 
+                          : handleClockIn('secondShift')
+                      }
+                      sx={{ 
+                        backgroundColor: currentShifts.secondShift?.status === 'in-progress' ? '#e74c3c' : '#2ecc71',
+                        color: '#fff'
+                      }}
+                    >
+                      {currentShifts.secondShift?.status === 'in-progress' ? 'Clock Out' : 'Clock In'}
+                    </Button>
+                  )}
+                </Box>
+              </Box>
+
+              {/* Third Shift (10PM-2AM) */}
+              <Box sx={{ mb: 2, p: 2, border: '1px solid #e0d6c2', borderRadius: '12px' }}>
+                <Typography variant="subtitle2" fontWeight="bold" color="#6f4e37">
+                  3rd Shift (10PM-2AM)
+                </Typography>
+                <Typography variant="body2" color="#9c8c72">
+                  Status: {currentShifts.thirdShift?.status || 'Not started'}
+                </Typography>
+                {currentShifts.thirdShift?.clockIn && (
+                  <Typography variant="body2" color="#9c8c72">
+                    Clocked in: {format(currentShifts.thirdShift.clockIn, 'h:mm a')}
+                  </Typography>
+                )}
+                {currentShifts.thirdShift?.clockOut && (
+                  <Typography variant="body2" color="#9c8c72">
+                    Clocked out: {format(currentShifts.thirdShift.clockOut, 'h:mm a')}
+                  </Typography>
+                )}
+                <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+                  {currentShifts.thirdShift?.status !== 'completed' && (
+                    <Button 
+                      variant="contained"
+                      size="small"
+                      onClick={() => 
+                        currentShifts.thirdShift?.status === 'in-progress' 
+                          ? handleClockOut('thirdShift') 
+                          : handleClockIn('thirdShift')
+                      }
+                      sx={{ 
+                        backgroundColor: currentShifts.thirdShift?.status === 'in-progress' ? '#e74c3c' : '#2ecc71',
+                        color: '#fff'
+                      }}
+                    >
+                      {currentShifts.thirdShift?.status === 'in-progress' ? 'Clock Out' : 'Clock In'}
+                    </Button>
+                  )}
+                </Box>
+              </Box>
             </Grid>
-          </Grid>
 
           {/* Current Shift Notes Preview */}
           {currentShiftNote && (
-            <Box sx={{ 
-              mt: 2, 
-              p: 2, 
-              border: '1px dashed #d4a762', 
-              borderRadius: '12px',
-              backgroundColor: 'rgba(255,243,224,0.7)'
-            }}>
-              <Box display="flex" alignItems="center" mb={1}>
-                <Note sx={{ color: '#d4a762', mr: 1 }} />
-                <Typography variant="subtitle2" fontWeight="bold" color="#6f4e37">
-                  Your Shift Notes:
-                </Typography>
-              </Box>
-              <Typography variant="body2" sx={{ whiteSpace: 'pre-line', color: '#5a3d2a' }}>
-                {currentShiftNote.notes}
-              </Typography>
-            </Box>
-          )}
+              <Grid item xs={12}>
+                <Box sx={{ 
+                  mt: 2, 
+                  p: 2, 
+                  border: '1px dashed #d4a762', 
+                  borderRadius: '12px',
+                  backgroundColor: 'rgba(255,243,224,0.7)'
+                }}>
+                  <Box display="flex" alignItems="center" mb={1}>
+                    <Note sx={{ color: '#d4a762', mr: 1 }} />
+                    <Typography variant="subtitle2" fontWeight="bold" color="#6f4e37">
+                      Your Shift Notes:
+                    </Typography>
+                  </Box>
+                  <Typography variant="body2" sx={{ whiteSpace: 'pre-line', color: '#5a3d2a' }}>
+                    {currentShiftNote.notes}
+                  </Typography>
+                </Box>
+              </Grid>
+            )}
+          </Grid>
         </CardContent>
       </Card>
     </Grid>
